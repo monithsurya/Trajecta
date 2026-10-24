@@ -156,7 +156,7 @@ The video renderer reports the actual outcome and measured placement error. Scre
 
 ## Limitations and roadmap
 
-Current task/controller assumptions are specific to the bundled Panda scene. Experience records are episode-level; they are not sufficient for offline RL or dynamics learning. Calibration, policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
+Current task/controller assumptions are specific to the bundled Panda scene. Episode summaries remain episode-level; optional step records capture the environment's zero reward and are a recording facility, not a policy-training or learned-dynamics pipeline. Calibration, policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
 
 Roadmap: (1) expand randomized held-out task evaluation; (2) add bounded controller calibration; (3) train/evaluate a policy and a narrowly scoped dynamics baseline; (4) measure candidate selection against a random baseline; (5) define and validate any hardware boundary independently. Transition capture is a data-recording facility only; it does not implement reinforcement learning, a learned world model, or adaptive experiment selection.
 
