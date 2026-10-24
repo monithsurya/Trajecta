@@ -31,7 +31,8 @@ Robotics experiments need clear task outcomes, repeatable configurations, and tr
 | Inverse kinematics and end-effector positioning | Implemented and unit-tested |
 | Pick-and-place execution | Implemented with bilateral contact, lift, release, and placement checks |
 | Experiment runner and episode evaluation | Implemented; seeded episode sequence and summary metrics |
-| Episode experience persistence | Implemented as validated JSONL summaries (not step transitions) |
+| Episode experience persistence | Implemented as validated JSONL summaries |
+| Step-level transition recording | Implemented as optional versioned JSONL records with validated loading and manifests |
 | Failure diagnosis | Initial deterministic evidence-linked rules; hypotheses, not causal conclusions |
 | Dataset filtering, manifest, export, grouped split | Implemented for episode summary records |
 | Controller calibration and system identification | Not implemented |
@@ -54,6 +55,7 @@ flowchart LR
   Result --> Eval[ExperimentEvaluator]
   Result --> Record[ExperienceRecord]
   Record --> Store[JSONL experience store]
+  Task --> Transitions[Optional transition JSONL store]
   Store --> Dataset[Dataset filtering and grouped split]
   Store --> Failure[Deterministic failure diagnosis]
 ```
@@ -118,6 +120,14 @@ Run a headless batch and persist episode summaries:
 python examples/evaluate_pick_place.py --episodes 5 --seed 0 --output artifacts/experiences.jsonl
 ```
 
+To also record every environment step, pass a separate transition output path:
+
+```bash
+python examples/evaluate_pick_place.py --episodes 1 --seed 0 --output artifacts/experiences.jsonl --transitions artifacts/transitions.jsonl
+```
+
+This writes episode summaries and step transitions separately. The transition dataset is validated after the run and a matching `artifacts/transitions.manifest.json` is written. Load it with `TransitionDataset.from_jsonl("artifacts/transitions.jsonl")` from `roboforge.experiments`. Transitions preserve the environment reward (currently `0.0` in the MuJoCo adapter); task success and phase are separate fields and are not presented as a learned or shaped reward.
+
 Analyze failures in a saved JSONL file:
 
 ```bash
@@ -140,7 +150,7 @@ More examples and the exact stored fields are documented in [experiments](docs/e
 
 ## Evaluation data
 
-The checked-in local run record set contains five successful episodes at seeds 0 through 4. Every record reports 570 control steps and 0.007594639 m horizontal placement error. The current environment resets the object to the same fixed location; these seeds do not yet randomize object or goal placement. Treat this as a deterministic smoke run, not evidence of generalization or a statistically meaningful benchmark. JSONL outputs contain episode summaries and omit per-step observations/actions/rewards.
+The checked-in local run record set contains five successful episodes at seeds 0 through 4. Every record reports 570 control steps and 0.007594639 m horizontal placement error. The current environment resets the object to the same fixed location; these seeds do not yet randomize object or goal placement. Treat this as a deterministic smoke run, not evidence of generalization or a statistically meaningful benchmark. Episode summary JSONL omits per-step observations/actions/rewards; optional transition JSONL captures those separately.
 
 The video renderer reports the actual outcome and measured placement error. Screenshots in `media/frames/` are captures from the same simulator, not external photos.
 
@@ -148,7 +158,7 @@ The video renderer reports the actual outcome and measured placement error. Scre
 
 Current task/controller assumptions are specific to the bundled Panda scene. Experience records are episode-level; they are not sufficient for offline RL or dynamics learning. Calibration, policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
 
-Roadmap: (1) collect validated state-action-reward transitions; (2) expand randomized held-out task evaluation; (3) add bounded controller calibration; (4) train/evaluate a policy and a narrowly scoped dynamics baseline; (5) measure candidate selection against a random baseline; (6) define and validate any hardware boundary independently.
+Roadmap: (1) expand randomized held-out task evaluation; (2) add bounded controller calibration; (3) train/evaluate a policy and a narrowly scoped dynamics baseline; (4) measure candidate selection against a random baseline; (5) define and validate any hardware boundary independently. Transition capture is a data-recording facility only; it does not implement reinforcement learning, a learned world model, or adaptive experiment selection.
 
 ## Contribution, license, and attribution
 

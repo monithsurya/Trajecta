@@ -1,6 +1,7 @@
 """Pick-and-place state-machine tests plus a deterministic MuJoCo trial."""
 
 from types import SimpleNamespace
+from uuid import uuid4
 
 import numpy as np
 import pytest
@@ -10,6 +11,7 @@ from roboforge.controllers.end_effector_position import PandaEndEffectorPosition
 from roboforge.environments.mujoco_env import MujocoRobotEnvironment
 from roboforge.experiments.evaluation import ExperimentEvaluator
 from roboforge.experiments.experience import experience_from_result
+from roboforge.experiments.transitions import JsonlTransitionStore, TransitionDataset
 from roboforge.tasks.pick_place import PickPlaceConfig, PickPlaceTask, TaskPhase
 
 
@@ -110,15 +112,42 @@ def test_fake_release_action_uses_open_gripper_command(fake_task):
     assert env.actions[-1][task._gripper_action_index] == 1.0
 
 
+def test_step_recording_is_optional_and_persists_completed_step_on_task_error(fake_task, tmp_path):
+    task, env = fake_task
+    task._check_phase_progress = lambda dt: None
+    task.step()
+    assert task._transition_recorder is None
+
+    task.reset(seed=2)
+    store = JsonlTransitionStore(tmp_path / "transitions.jsonl")
+    task.configure_transition_recording(
+        recorder=store, experiment_id=uuid4(), episode_id=uuid4(), seed=2,
+    )
+    observation = task._obs.copy()
+    task._check_phase_progress = lambda dt: (_ for _ in ()).throw(RuntimeError("synthetic task error"))
+    with pytest.raises(RuntimeError, match="synthetic task error"):
+        task.step()
+    recorded = store.read_all()[0]
+    assert len(store.read_all()) == 1
+    assert recorded.observation == tuple(float(x) for x in observation)
+    assert recorded.action == tuple(float(x) for x in env.actions[-1])
+
+
 def test_pick_place_config_rejects_invalid_destination():
     with pytest.raises(ValueError):
         PickPlaceConfig(destination_xy_m=(np.nan, 0.0))
 
 
-def test_real_scene_completes_contact_verified_pick_and_place():
+def test_real_scene_completes_and_records_contact_verified_pick_and_place(tmp_path):
     env = MujocoRobotEnvironment(n_substeps=10, max_episode_steps=10_000)
     try:
         task = PickPlaceTask(env, PandaEndEffectorPositionController(env))
+        transition_store = JsonlTransitionStore(tmp_path / "transitions.jsonl")
+        experiment_id, episode_id = uuid4(), uuid4()
+        task.configure_transition_recording(
+            recorder=transition_store, experiment_id=experiment_id,
+            episode_id=episode_id, seed=4,
+        )
         result = task.run(seed=4, max_steps=4_000)
         assert result.success, result.failure_reason
         assert result.grasp_verified
@@ -130,5 +159,12 @@ def test_real_scene_completes_contact_verified_pick_and_place():
         )
         assert record.grasp_verified is True
         assert ExperimentEvaluator().evaluate([result]).successful_episodes == 1
+        transitions = TransitionDataset.from_jsonl(transition_store.path).records
+        assert len(transitions) == result.episode_length
+        assert [item.transition_index for item in transitions] == list(range(result.episode_length))
+        assert all(item.experiment_id == experiment_id and item.episode_id == episode_id for item in transitions)
+        assert transitions[0].observation != transitions[0].next_observation
+        assert transitions[-1].task_success is True
+        assert transitions[-1].task_phase == TaskPhase.VERIFY_PLACEMENT.value
     finally:
         env.close()

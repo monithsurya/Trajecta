@@ -15,6 +15,8 @@ from roboforge.experiments import (
     ExperimentRunner,
     ExperimentSpec,
     JsonlExperienceStore,
+    JsonlTransitionStore,
+    TransitionDataset,
     TaskType,
 )
 from roboforge.tasks.pick_place import PickPlaceConfig, PickPlaceTask
@@ -25,6 +27,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--episodes", type=int, default=5)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--output", type=Path, default=Path("artifacts/experiences.jsonl"))
+    parser.add_argument(
+        "--transitions", type=Path, default=None,
+        help="optional step-level JSONL output (for example artifacts/transitions.jsonl)",
+    )
     args = parser.parse_args(argv)
     spec = ExperimentSpec(
         task=TaskType.PICK_AND_PLACE,
@@ -44,12 +50,14 @@ def main(argv: list[str] | None = None) -> int:
         task_config = PickPlaceConfig()
         task = PickPlaceTask(env, PandaEndEffectorPositionController(env), task_config)
         store = JsonlExperienceStore(args.output)
+        transition_store = JsonlTransitionStore(args.transitions) if args.transitions else None
         run = ExperimentRunner(
             task,
             spec,
             environment_id="mujoco_panda_scene",
             task_config=asdict(task_config),
             recorder=store,
+            transition_recorder=transition_store,
         ).run()
         summary = run.summary
         print(f"Attempted episodes: {summary.attempted_episodes}")
@@ -59,6 +67,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Mean placement error (m): {summary.mean_placement_error_m}")
         print(f"Failures: {summary.failure_counts}")
         print(f"JSONL records: {store.path.resolve()}")
+        if transition_store is not None:
+            dataset = TransitionDataset.from_jsonl(transition_store.path)
+            manifest_path = transition_store.path.with_suffix(".manifest.json")
+            dataset.write_manifest(manifest_path)
+            print(f"Transition records: {len(dataset.records)}")
+            print(f"Transition manifest: {manifest_path.resolve()}")
         return 0 if summary.successful_episodes == summary.attempted_episodes else 1
     finally:
         env.close()

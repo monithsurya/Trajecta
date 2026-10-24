@@ -16,6 +16,12 @@ from roboforge.experiments.experience import ExperienceRecord, ExperienceRecorde
 from roboforge.experiments.runner import ExperimentRun, ExperimentRunner
 from roboforge.experiments.failure_analysis import FailureDiagnosis, analyze, diagnose
 from roboforge.experiments.dataset import DatasetManifest, ExperienceDataset
+from roboforge.experiments.transitions import (
+    JsonlTransitionStore,
+    TransitionDataset,
+    TransitionRecord,
+    TransitionRecorder,
+)
 
 __all__ = [
     "MAX_SEED_VALUE",
@@ -35,4 +41,8 @@ __all__ = [
     "diagnose",
     "DatasetManifest",
     "ExperienceDataset",
+    "JsonlTransitionStore",
+    "TransitionDataset",
+    "TransitionRecord",
+    "TransitionRecorder",
 ]

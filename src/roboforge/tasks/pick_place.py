@@ -10,9 +10,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
+from uuid import UUID
 
 import mujoco
 import numpy as np
+
+from roboforge.experiments.transitions import TransitionRecord, TransitionRecorder
 
 
 class TaskPhase(str, Enum):
@@ -126,6 +129,22 @@ class PickPlaceTask:
         self._grasp_confirmed_at: float | None = None
         self._cube_initial: np.ndarray | None = None
         self._cube_position_before_lift: np.ndarray | None = None
+        self._transition_recorder: TransitionRecorder | None = None
+        self._transition_experiment_id: UUID | None = None
+        self._transition_episode_id: UUID | None = None
+        self._transition_seed: int | None = None
+        self._transition_index = 0
+
+    def configure_transition_recording(
+        self, *, recorder: TransitionRecorder | None, experiment_id: UUID, episode_id: UUID,
+        seed: int | None,
+    ) -> None:
+        """Set optional recording for the next run; IDs match its episode summary."""
+        self._transition_recorder = recorder
+        self._transition_experiment_id = experiment_id
+        self._transition_episode_id = episode_id
+        self._transition_seed = seed
+        self._transition_index = 0
 
     def reset(self, *, seed: int | None = None) -> np.ndarray:
         """Reset to the model home key and initialize targets from live geometry."""
@@ -356,10 +375,42 @@ class PickPlaceTask:
             TaskPhase.APPROACH, TaskPhase.ALIGN, TaskPhase.DESCEND,
             TaskPhase.RELEASE, TaskPhase.VERIFY_PLACEMENT,
         ) else -1.0
-        self._obs, reward, terminated, truncated, info = self.env.step(action)
+        observation = self._obs.copy()
+        applied_action = np.asarray(action).copy()
+        action_phase = self.phase.value
+        self._obs, reward, terminated, truncated, info = self.env.step(applied_action)
         self.episode_length += 1
-        self.phase_elapsed += 0.0
-        self._check_phase_progress(dt)
+        try:
+            self.phase_elapsed += 0.0
+            self._check_phase_progress(dt)
+            if self.result is None and (terminated or truncated):
+                self._finish(False, "environment terminated or truncated before task completion")
+        finally:
+            # Persist even if task-side post-step evaluation raises: env.step has
+            # already completed, so omitting this transition would hide data.
+            if self._transition_recorder is not None:
+                assert self._transition_experiment_id is not None and self._transition_episode_id is not None
+                record = TransitionRecord.from_transition(
+                    experiment_id=self._transition_experiment_id,
+                    episode_id=self._transition_episode_id,
+                    transition_index=self._transition_index,
+                    seed=self._transition_seed,
+                    observation=observation,
+                    action=applied_action,
+                    next_observation=self._obs,
+                    # Preserve the environment reward; task success is separate.
+                    reward=reward,
+                    terminated=terminated,
+                    truncated=truncated,
+                    simulation_time_s=info.get("simulation_time"),
+                    simulation_timestep_s=dt,
+                    environment_step=info.get("step_count"),
+                    task_phase=action_phase,
+                    task_success=self.result.success if self.result is not None else None,
+                    task_failure_reason=self.result.failure_reason if self.result is not None else None,
+                )
+                self._transition_recorder.write(record)
+                self._transition_index += 1
         return TaskStep(self._obs.copy(), float(reward), bool(terminated), bool(truncated), info, self.phase, self.result)
 
     def _check_phase_progress(self, dt: float) -> None:

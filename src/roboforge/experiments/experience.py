@@ -66,6 +66,7 @@ def experience_from_result(
     controller_config: dict[str, Any] | None = None,
     duration_seconds: float | None = None,
     experiment_id: UUID | None = None,
+    episode_id: UUID | None = None,
 ) -> ExperienceRecord:
     """Build a record only from fields exposed by the result and run context."""
     success = getattr(result, "success", None)
@@ -85,6 +86,7 @@ def experience_from_result(
     return ExperienceRecord(
         task_id=task_id,
         experiment_id=experiment_id or uuid4(),
+        episode_id=episode_id or uuid4(),
         environment_id=environment_id,
         experiment_config=experiment_config or {},
         task_config=task_config,

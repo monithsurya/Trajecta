@@ -14,6 +14,7 @@ from roboforge.experiments.experience import (
     experience_from_result,
 )
 from roboforge.experiments.spec import ExperimentSpec, MAX_SEED_VALUE
+from roboforge.experiments.transitions import TransitionRecorder
 
 
 class EpisodeTask(Protocol):
@@ -40,6 +41,7 @@ class ExperimentRunner:
         environment_id: str,
         task_config: dict[str, Any] | None = None,
         recorder: ExperienceRecorder | None = None,
+        transition_recorder: TransitionRecorder | None = None,
         evaluator: ExperimentEvaluator | None = None,
     ) -> None:
         if not environment_id.strip():
@@ -49,6 +51,7 @@ class ExperimentRunner:
         self.environment_id = environment_id
         self.task_config = task_config
         self.recorder = recorder
+        self.transition_recorder = transition_recorder
         self.evaluator = evaluator or ExperimentEvaluator()
 
     def run(self) -> ExperimentRun:
@@ -59,6 +62,18 @@ class ExperimentRunner:
         experiment_id = uuid4()
         for episode_index in range(self.spec.episodes):
             seed = None if self.spec.seed is None else (self.spec.seed + episode_index) % (MAX_SEED_VALUE + 1)
+            episode_id = uuid4()
+            configure = getattr(self.task, "configure_transition_recording", None)
+            if self.transition_recorder is not None:
+                if configure is None:
+                    raise TypeError("transition recording requires a task with configure_transition_recording()")
+            if configure is not None:
+                configure(
+                    recorder=self.transition_recorder,
+                    experiment_id=experiment_id,
+                    episode_id=episode_id,
+                    seed=seed,
+                )
             started = time.monotonic()
             result = self.task.run(seed=seed)
             duration = time.monotonic() - started
@@ -73,6 +88,7 @@ class ExperimentRunner:
                 controller_config=controller_config,
                 duration_seconds=duration,
                 experiment_id=experiment_id,
+                episode_id=episode_id,
             )
             records.append(record)
             if self.recorder is not None:
