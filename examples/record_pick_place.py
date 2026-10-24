@@ -23,12 +23,25 @@ def main() -> int:
     parser.add_argument("--fps", type=int, default=50)
     parser.add_argument("--width", type=int, default=1280)
     parser.add_argument("--height", type=int, default=720)
+    parser.add_argument(
+        "--vary-conditions", action="store_true",
+        help="Sample seeded cube/goal positions, robot joint offsets, and cube mass/friction.",
+    )
     args = parser.parse_args()
     if args.fps <= 0 or args.width <= 0 or args.height <= 0:
         parser.error("fps, width, and height must be positive")
 
     env = MujocoRobotEnvironment(max_episode_steps=10_000)
-    task = PickPlaceTask(env, PandaEndEffectorPositionController(env, position_tolerance=0.005), PickPlaceConfig())
+    config = PickPlaceConfig()
+    if args.vary_conditions:
+        config = PickPlaceConfig(
+            cube_start_bounds_m=((0.40, -0.08, 0.725), (0.50, 0.08, 0.725)),
+            destination_bounds_xy_m=((0.62, -0.18), (0.68, -0.12)),
+            robot_joint_perturbation_rad=0.02,
+            cube_mass_scale_range=(0.9, 1.1),
+            cube_friction_scale_range=(0.9, 1.1),
+        )
+    task = PickPlaceTask(env, PandaEndEffectorPositionController(env, position_tolerance=0.005), config)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     writer = cv2.VideoWriter(str(args.output), cv2.VideoWriter_fourcc(*"mp4v"), args.fps, (args.width, args.height))
     if not writer.isOpened():
@@ -38,6 +51,7 @@ def main() -> int:
     renderer = None
     try:
         task.reset(seed=args.seed)
+        print(f"Conditions: {task.condition_parameters}")
         env.model.vis.global_.offwidth = max(int(env.model.vis.global_.offwidth), args.width)
         env.model.vis.global_.offheight = max(int(env.model.vis.global_.offheight), args.height)
         env.model.vis.headlight.ambient[:] = (0.34, 0.34, 0.34)
@@ -67,6 +81,17 @@ def main() -> int:
             cv2.rectangle(frame, (0, 0), (args.width, 84), (20, 25, 31), -1)
             cv2.putText(frame, "TRAJECTA", (44, 39), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (225, 238, 244), 2, cv2.LINE_AA)
             cv2.putText(frame, "FRANKA PANDA  |  MUJOCO SIMULATION", (44, 67), cv2.FONT_HERSHEY_SIMPLEX, 0.47, (173, 190, 201), 1, cv2.LINE_AA)
+            if args.vary_conditions:
+                cube = task.condition_parameters["cube_position_m"]
+                destination = task.condition_parameters["destination_xy_m"]
+                variation = (
+                    f"SEEDED VARIATION  cube=({cube[0]:.3f}, {cube[1]:.3f}) m  "
+                    f"goal=({destination[0]:.3f}, {destination[1]:.3f}) m  "
+                    f"mass x{task.condition_parameters['cube_mass_scale']:.2f}  "
+                    f"friction x{task.condition_parameters['cube_friction_scale']:.2f}"
+                )
+                cv2.rectangle(frame, (0, args.height - 46), (args.width, args.height), (20, 25, 31), -1)
+                cv2.putText(frame, variation, (44, args.height - 17), cv2.FONT_HERSHEY_SIMPLEX, 0.48, (200, 216, 224), 1, cv2.LINE_AA)
             status = label if success is None else ("PICK AND PLACE COMPLETE" if success else "TASK FAILED")
             color = (85, 220, 150) if success else (245, 206, 115)
             text_size = cv2.getTextSize(status, cv2.FONT_HERSHEY_SIMPLEX, 0.58, 1)[0]
