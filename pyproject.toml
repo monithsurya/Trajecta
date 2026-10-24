@@ -47,6 +47,9 @@ dev = [
 video = [
     "opencv-python>=4.8,<5.0",
 ]
+rl = [
+    "stable-baselines3>=2.7.0,<3.0.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
