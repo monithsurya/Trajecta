@@ -141,6 +141,11 @@ def test_train_world_model_reports_persistence_comparison():
     assert report["test"]["learned"]["aggregate_rmse"] < report["test"]["persistence_baseline"]["aggregate_rmse"]
     assert report["dataset_sha256"]
     assert model.coefficients is not None
+    full_observation = np.zeros(37)
+    full_observation[3] = 1.0
+    predicted_full = model.predict_full_observation(full_observation, np.zeros(3))
+    assert predicted_full.shape == (37,)
+    np.testing.assert_array_equal(predicted_full[:7], full_observation[:7])
 
 
 def test_reach_candidate_generation_and_selection_are_bounded_and_reproducible():
@@ -148,6 +153,7 @@ def test_reach_candidate_generation_and_selection_are_bounded_and_reproducible()
     from roboforge.experiments.active_learning import (
         generate_reach_candidates,
         select_candidate,
+        validation_supports_uncertainty,
     )
 
     config = PandaReachConfig()
@@ -166,6 +172,14 @@ def test_reach_candidate_generation_and_selection_are_bounded_and_reproducible()
     )
     with pytest.raises(ValueError, match="one pre-execution score"):
         select_candidate(candidates, strategy="uncertainty", seed=8, scores={})
+    assert validation_supports_uncertainty({
+        "learned": {"normalized_aggregate_rmse": 0.8},
+        "persistence_baseline": {"normalized_aggregate_rmse": 1.0},
+    })
+    assert not validation_supports_uncertainty({
+        "learned": {"normalized_aggregate_rmse": 1.1},
+        "persistence_baseline": {"normalized_aggregate_rmse": 1.0},
+    })
 
 
 def test_active_learning_loop_bootstraps_selects_records_and_updates(tmp_path):
@@ -198,6 +212,26 @@ def test_active_learning_loop_bootstraps_selects_records_and_updates(tmp_path):
     distances = np.linalg.norm(targets[:, None, :] - targets[None, :, :], axis=2)
     distances[np.diag_indices_from(distances)] = np.inf
     assert np.min(distances) >= 0.015
+    from roboforge.experiments.world_model import load_world_model
+    saved_model = load_world_model(tmp_path / "run" / "world_model_000.npz")
+    continued = run_active_learning(
+        experience_path=tmp_path / "experiences.jsonl",
+        transition_path=tmp_path / "transitions.jsonl",
+        artifact_dir=tmp_path / "continued",
+        initial_model_path=tmp_path / "run" / "world_model_000.npz",
+        seed=8,
+        bootstrap_episodes=5,
+        iterations=1,
+        candidate_count=4,
+        model_members=3,
+    )
+    assert continued["initial_model_path"].endswith("world_model_000.npz")
+    continued_decisions = [
+        json.loads(line)
+        for line in (tmp_path / "continued" / "selection_decisions.jsonl").read_text().splitlines()
+    ]
+    selected = [item for item in continued_decisions if item["iteration"] == 0]
+    assert selected[0]["model_version"] == saved_model.provenance["dataset_sha256"]
 
 
 def test_random_and_uncertainty_benchmark_uses_identical_bootstrap_and_fixed_test(tmp_path):

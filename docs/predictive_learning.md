@@ -27,7 +27,7 @@ Validation and test metrics include raw per-feature RMSE, raw aggregate RMSE/MAE
 
 The current candidate dimension is the reach target XYZ position. Candidates are sampled with an explicit seed inside the configured goal bounds, which are validated as contained by the task workspace. Rounded target IDs and a minimum target separation avoid duplicate or near-duplicate selections within a run. The IK heuristic remains the execution controller; selection does not change controller gains or hardware behavior.
 
-The random strategy samples the generated valid candidate pool with a seeded generator. The uncertainty strategy resets an environment at each candidate target, obtains the current observation and heuristic action, and ranks the prior model's ensemble disagreement for that one-step prediction. Each decision record stores the candidate pool/scoring seeds and pre-execution scores with the chosen target; its outcome fields are added after the run. The true outcome is only consumed after execution.
+The random strategy samples the generated valid candidate pool with a seeded generator. Before uncertainty scoring, the model's validation normalized RMSE must beat the persistence baseline; otherwise the loop records a fallback and uses seeded random selection. Test metrics are never used in this decision. If the validation gate passes, the uncertainty strategy resets an environment at each candidate target, obtains the current observation and heuristic action, and ranks the prior model's ensemble disagreement for that one-step prediction. Each decision record stores the candidate pool/scoring seeds and pre-execution scores with the chosen target; its outcome fields are added after the run. The true outcome is only consumed after execution.
 
 ## Bootstrap, run, and compare
 
@@ -39,30 +39,55 @@ python examples/run_active_learning.py \
   --strategy uncertainty --seed 0 --bootstrap-episodes 5 --iterations 3
 ```
 
+For an existing transition store and compatible previously trained model, pass their paths along with `--model`; the output directory must be fresh:
+
+```bash
+python examples/run_active_learning.py \
+  --output-dir artifacts/active_learning_continued \
+  --transition-path artifacts/previous_run/transitions.jsonl \
+  --experience-path artifacts/previous_run/experiences.jsonl \
+  --model artifacts/previous_run/world_model_000.npz \
+  --seed 0 --iterations 3
+```
+
+The model's trained episode IDs must be present in the supplied transition dataset. Without a model, the workflow bootstraps and fits one from the data before selecting.
+
+To train and evaluate a model explicitly from an existing transition dataset, then reload it for a full-observation prediction:
+
+```bash
+python examples/train_world_model.py artifacts/active_learning_uncertainty/transitions.jsonl \
+  --model-output artifacts/reach_model.npz --report-output artifacts/reach_model_metrics.json --seed 0
+python examples/predict_world_model.py artifacts/reach_model.npz artifacts/one_observation.json 0.0 0.5 -0.2
+```
+
+The training command requires at least five distinct reach episodes and refuses to overwrite model or report paths. Its report contains train/validation/test transition and episode counts, per-feature and aggregate errors, the persistence comparison, split IDs, metric scales, and transition-file SHA-256. Prediction expects one full 37-value `PandaReachEnv` observation and returns a full next observation; fixed-base fields excluded from training are preserved from the input. `load_world_model()` and `predict_full_observation()` provide the same operation as Python APIs.
+
 Compare random and uncertainty selection under paired conditions:
 
 ```bash
 python examples/compare_selection_strategies.py \
   --output-dir artifacts/selection_comparison \
-  --seeds 0 1 2 --bootstrap-episodes 5 --iterations 3
+  --seeds 0 1 2 --bootstrap-episodes 15 --iterations 3
 ```
 
-For each seed, comparison first runs one bootstrap and copies the exact same structured data into both strategy arms. They use the same task configuration, seeds, candidate pool generation, and fixed bootstrap validation/test episodes. `comparison.json` reports held-out RMSE change, persistence baseline error, experiment/transition counts, failures, and measured training/execution time. Outcomes may favor either strategy; this is a small simulation study and should be run with multiple seeds and larger budgets before drawing conclusions.
+For each seed, comparison first runs one bootstrap and copies the exact same structured data into both strategy arms. They use the same task configuration, seeds, candidate pool generation, and fixed bootstrap validation/test episodes. `comparison.json` reports held-out RMSE change and reduction per selected experiment/per measured selection, execution, and model-training second; it also records persistence error, experiment/transition counts, failures, and those timing components. Outcomes may favor either strategy; this is a small simulation study and should be run with multiple seeds and larger budgets before drawing conclusions.
 
 The output directory must be new or empty; checkpoints, metrics, datasets, and decision logs are not written into Git-tracked source. Existing experience and transition stores are append-only and are validated when loaded. Back them up before intentionally reusing paths. Model files use versioned NPZ artifacts with JSON metadata and reject overwrites.
 
 ## Reference comparison
 
-A local three-seed smoke comparison used five bootstrap episodes, three selected episodes per arm, 16 candidates per selection, 60-step episode caps, and five ridge ensemble members. Each seed's two arms began from byte-identical bootstrap stores, used the same fixed one-episode test set, and shared its bootstrap-trained feature scales for normalized metrics. The table reports normalized aggregate test RMSE (lower is better):
+A local three-seed comparison used 15 bootstrap episodes, three selected episodes per arm, 16 candidates per selection, 60-step episode caps, and five ridge ensemble members. Each seed's two arms began from byte-identical bootstrap stores, used the same fixed held-out episodes, and shared its bootstrap-trained feature scales for normalized metrics. Uncertainty selection was enabled only when the model beat persistence on validation; otherwise it would fall back to random. The table reports normalized aggregate test RMSE (lower is better):
 
 | Seed | Initial model | Persistence after data | Random after data | Uncertainty after data |
 | --- | ---: | ---: | ---: | ---: |
-| 0 | 13.304 | 1.741 | 2.281 | 1.119 |
-| 1 | 1.074 | 1.134 | 1.249 | 0.534 |
-| 2 | 2.749 | 1.308 | 1.214 | 1.538 |
-| Mean final | — | 1.394 | 1.581 | 1.064 |
+| 0 | 0.672 | 1.373 | 0.735 | 0.478 |
+| 1 | 0.913 | 1.402 | 0.755 | 0.461 |
+| 2 | 0.639 | 1.426 | 0.347 | 0.401 |
+| Mean final | — | 1.401 | 0.612 | 0.447 |
 
-Uncertainty selection had lower final test error than random on two of three seeds and a lower three-seed mean, while random was better on seed 2. Neither selection arm beat persistence on every seed. The selected episodes produced similar data budgets (376 uncertainty-selected versus 381 random-selected transitions across the trials), with no failed selected episodes. Uncertainty candidate generation/scoring took about 0.08 seconds per selection versus 0.04 seconds for random candidate generation/selection on this host. Running the three selected episodes took roughly 0.05 seconds per seed/arm; four model fits took about 0.018–0.019 seconds per arm. Ensemble-disagreement/error correlations on the final per-seed test episodes were 0.969, 0.048, and 0.777 for uncertainty runs. These measurements vary with seed and test episode. One test episode per seed and three trials are too small to establish that uncertainty selection improves learning efficiency or that disagreement reliably estimates error. Treat this as an inconclusive prototype comparison.
+Both adaptive arms beat persistence on all three seeds. Uncertainty selection had lower final test error on two seeds and a lower three-seed mean; random was better on seed 2. The final datasets contained 820 transitions in the uncertainty arms versus 822 in random arms, with no failed episodes. Candidate scoring took about 0.085 seconds across three uncertainty rounds (about 0.028 seconds per round) versus 0.042 seconds total for random selection. Episode execution took about 0.05 seconds per arm/seed; four model fits took around 0.05 seconds per arm. Disagreement/error correlations on the uncertainty held-out episodes were 0.619, 0.056, and 0.261. So the mean-error result favors uncertainty in this small run, but per-seed outcome varies and disagreement-error correlation was weak for two seeds. Three trials and a small fixed test set do not establish a reliable learning-efficiency benefit or calibrated uncertainty.
+
+An explicit training smoke run on the five-episode bootstrap dataset from the earlier run reported test normalized RMSE 13.30 for the learned model versus 1.74 for persistence. This actual recorded-data result is substantially worse than baseline; the resulting model can be loaded and queried, but that score does not support using it for uncertainty-directed selection. The validation gate keeps the active loop on random selection when this happens.
 
 ## Limits
 

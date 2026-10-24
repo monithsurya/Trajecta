@@ -176,7 +176,7 @@ Run one bounded predictive-learning/selection loop, or compare random with uncer
 
 ```bash
 python examples/run_active_learning.py --strategy uncertainty --seed 0 --bootstrap-episodes 5 --iterations 3
-python examples/compare_selection_strategies.py --seeds 0 1 2 --bootstrap-episodes 5 --iterations 3
+python examples/compare_selection_strategies.py --seeds 0 1 2 --bootstrap-episodes 15 --iterations 3
 ```
 
 The reach-only model, uncertainty proxy, split protocol, logs, and scientific limits are documented in [predictive learning and experiment selection](docs/predictive_learning.md).

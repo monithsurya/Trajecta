@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import hashlib
 import json
 from pathlib import Path
 import shutil
@@ -23,6 +24,7 @@ from roboforge.experiments.transitions import JsonlTransitionStore, TransitionDa
 from roboforge.experiments.world_model import (
     EnsembleRidgeWorldModel,
     extract_reach_transitions,
+    load_world_model,
     reach_state_features,
     train_world_model,
 )
@@ -49,9 +51,11 @@ class SelectionDecision(BaseModel):
     scoring_reset_seed: int | None = Field(default=None, ge=0, le=4_294_967_295)
     dataset_episode_count_before: int = Field(ge=0)
     candidate_id: str
+    model_version: str | None = None
     goal_position_m: tuple[FiniteFloat, FiniteFloat, FiniteFloat]
     score: FiniteFloat | None = None
     candidate_scores: dict[str, float]
+    selection_note: str | None = None
     experiment_id: UUID | None = None
     episode_id: UUID | None = None
     success: bool | None = None
@@ -258,6 +262,18 @@ def select_candidate(
     return max(candidates, key=lambda item: (scores[item.candidate_id], item.candidate_id))
 
 
+def validation_supports_uncertainty(validation_metrics: dict[str, Any]) -> bool:
+    """Enable disagreement selection only when validation beats persistence."""
+    try:
+        learned = float(validation_metrics["learned"]["normalized_aggregate_rmse"])
+        baseline = float(validation_metrics["persistence_baseline"]["normalized_aggregate_rmse"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError("validation metrics must contain learned and persistence normalized RMSE") from exc
+    if not np.isfinite([learned, baseline]).all() or learned < 0 or baseline < 0:
+        raise ValueError("validation RMSE metrics must be finite and non-negative")
+    return learned < baseline
+
+
 def _execute_candidate(
     candidate: ReachCandidate,
     *,
@@ -300,6 +316,7 @@ def run_active_learning(
     iterations: int = 3,
     candidate_count: int = 16,
     model_members: int = 5,
+    initial_model_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Run a bounded bootstrap, selection, execution, and model-refit loop."""
     if not 0 <= seed <= 4_294_967_295:
@@ -371,6 +388,30 @@ def run_active_learning(
         "dataset_sha256": report["dataset_sha256"],
         "training_report": report,
     })
+    model_version = report["dataset_sha256"]
+    selection_metrics = report["validation"]
+    if initial_model_path is not None:
+        loaded_model = load_world_model(initial_model_path)
+        available_episodes = set(np.unique(arrays.episode_ids).tolist())
+        if not set(loaded_model.training_episode_ids).issubset(available_episodes):
+            raise ValueError("initial model was trained on episodes absent from the supplied transition dataset")
+        expected_training_hash = loaded_model.provenance.get("training_report", {}).get("training_data_sha256")
+        if expected_training_hash is not None:
+            actual_training_hash = hashlib.sha256(
+                "".join(
+                    record.model_dump_json() + "\n"
+                    for record in dataset.records
+                    if str(record.episode_id) in set(loaded_model.training_episode_ids)
+                ).encode("utf-8")
+            ).hexdigest()
+            if actual_training_hash != expected_training_hash:
+                raise ValueError("initial model training transitions do not match the supplied dataset provenance")
+        if loaded_model.observation_size != arrays.observations.shape[1] or loaded_model.action_size != arrays.actions.shape[1]:
+            raise ValueError("initial model feature dimensions do not match the supplied transition dataset")
+        model = loaded_model
+        prior_provenance = model.provenance
+        model_version = str(prior_provenance.get("dataset_sha256") or Path(initial_model_path).name)
+        selection_metrics = prior_provenance.get("training_report", {}).get("validation", selection_metrics)
 
     history = [{
         "phase": "bootstrap",
@@ -397,16 +438,21 @@ def run_active_learning(
             excluded_points=_recorded_goal_positions(dataset, config),
         )
         scoring_reset_seed = (seed + iteration + 20_000) % (4_294_967_295 + 1)
-        scores = None if strategy == "random" else score_candidates(
+        validation_supports_model = validation_supports_uncertainty(selection_metrics)
+        effective_strategy = "uncertainty" if strategy == "uncertainty" and validation_supports_model else "random"
+        selection_note = None
+        if strategy == "uncertainty" and not validation_supports_model:
+            selection_note = "fell back to seeded random selection because validation error did not beat persistence"
+        scores = None if effective_strategy == "random" else score_candidates(
             model, config, candidates, reset_seed=scoring_reset_seed,
         )
         selection_seed = (seed + iteration + 30_000) % (4_294_967_295 + 1)
-        chosen = select_candidate(candidates, strategy=strategy, seed=selection_seed, scores=scores)
+        chosen = select_candidate(candidates, strategy=effective_strategy, seed=selection_seed, scores=scores)
         selection_seconds = time.perf_counter() - selection_started
-        decision_id = f"selected-{strategy}-{iteration}-{chosen.candidate_id}"
+        decision_id = f"selected-{effective_strategy}-{iteration}-{chosen.candidate_id}"
         decision = SelectionDecision(
             decision_id=decision_id,
-            strategy=strategy,
+            strategy=effective_strategy,
             iteration=iteration,
             seed=(seed + iteration + bootstrap_episodes) % (4_294_967_295 + 1),
             candidate_generation_seed=candidate_generation_seed,
@@ -415,8 +461,10 @@ def run_active_learning(
             dataset_episode_count_before=len(np.unique(arrays_now.episode_ids)),
             candidate_id=chosen.candidate_id,
             goal_position_m=chosen.goal_position_m,
+            model_version=model_version,
             score=None if scores is None else scores[chosen.candidate_id],
             candidate_scores={} if scores is None else scores,
+            selection_note=selection_note,
         )
         try:
             run, elapsed = _execute_candidate(
@@ -455,6 +503,8 @@ def run_active_learning(
             fixed_test_episodes=tuple(report["split_episode_ids"]["test"]),
             evaluation_scale=evaluation_scale,
         )
+        model_version = report["dataset_sha256"]
+        selection_metrics = report["validation"]
         training_seconds = time.perf_counter() - training_started
         (output_dir / f"iteration_{iteration:03d}_metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
         model.save(output_dir / f"world_model_{iteration:03d}.npz", provenance={
@@ -465,6 +515,8 @@ def run_active_learning(
         history.append({
             "phase": "selection",
             "iteration": iteration,
+            "effective_strategy": effective_strategy,
+            "selection_note": selection_note,
             "candidate_id": chosen.candidate_id,
             "score": None if scores is None else scores[chosen.candidate_id],
             "success": result_record.success,
@@ -477,6 +529,8 @@ def run_active_learning(
     summary = {
         "schema_version": 1,
         "strategy": strategy,
+        "effective_strategy": history[-1].get("effective_strategy", strategy),
+        "initial_model_path": None if initial_model_path is None else str(Path(initial_model_path).resolve()),
         "seed": seed,
         "bootstrap_episodes": bootstrap_episodes,
         "requested_iterations": iterations,
@@ -554,6 +608,13 @@ def compare_selection_strategies(
             final_test = final_history["test"]
             decisions = decisions_records(arm_dir / "selection_decisions.jsonl")
             selected_decisions = [item for item in decisions if item.decision_id.startswith("selected-")]
+            effective_strategies = sorted({item.strategy for item in selected_decisions})
+            selection_seconds = float(sum(item.selection_seconds or 0.0 for item in selected_decisions))
+            experiment_seconds = float(sum(item.execution_seconds or 0.0 for item in selected_decisions))
+            training_seconds = float(sum(item.get("training_seconds", 0.0) for item in evaluated_history))
+            measured_seconds = selection_seconds + experiment_seconds + training_seconds
+            error_reduction = initial_metrics["learned"]["normalized_aggregate_rmse"] - final_test["learned"]["normalized_aggregate_rmse"]
+            attempted_experiments = len(selection_history)
             arms[strategy] = {
                 "initial_test_rmse": initial_metrics["learned"]["normalized_aggregate_rmse"],
                 "final_test_rmse": final_test["learned"]["normalized_aggregate_rmse"],
@@ -566,17 +627,25 @@ def compare_selection_strategies(
                 "initial_persistence_rmse": initial_metrics["persistence_baseline"]["aggregate_rmse"],
                 "final_persistence_rmse": final_test["persistence_baseline"]["aggregate_rmse"],
                 "test_episode_ids": final_history["test_episode_ids"],
-                "experiment_count": len(selection_history),
+                "experiment_count": attempted_experiments,
                 "completed_experiments": sum(item.episode_id is not None for item in selected_decisions),
+                "effective_strategies": effective_strategies,
                 "transition_count": final_history["transition_count"],
                 "failed_experiments": sum(
                     item.success is False or (item.failure_reason or "").startswith("execution_error:")
                     for item in selected_decisions
                 ),
                 "invalid_candidates": 0,
-                "experiment_seconds": float(sum(item.execution_seconds or 0.0 for item in decisions)),
-                "selection_seconds": float(sum(item.selection_seconds or 0.0 for item in decisions)),
-                "training_seconds": float(sum(item.get("training_seconds", 0.0) for item in evaluated_history)),
+                "experiment_seconds": experiment_seconds,
+                "selection_seconds": selection_seconds,
+                "training_seconds": training_seconds,
+                "measured_compute_seconds": measured_seconds,
+                "rmse_reduction_per_experiment": (
+                    error_reduction / attempted_experiments if attempted_experiments else None
+                ),
+                "rmse_reduction_per_measured_second": (
+                    error_reduction / measured_seconds if measured_seconds > 0 else None
+                ),
                 "run_summary": str((arm_dir / "run_summary.json").resolve()),
             }
         comparisons.append({

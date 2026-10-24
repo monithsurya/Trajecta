@@ -13,7 +13,10 @@ from roboforge.environments.panda_reach import PandaReachConfig
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/active_learning_uncertainty"))
+    parser.add_argument("--experience-path", type=Path, default=None)
+    parser.add_argument("--transition-path", type=Path, default=None)
     parser.add_argument("--strategy", choices=("random", "uncertainty"), default="uncertainty")
+    parser.add_argument("--model", type=Path, default=None, help="optional compatible trained model from the supplied transition dataset")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--bootstrap-episodes", type=int, default=5)
     parser.add_argument("--iterations", type=int, default=3)
@@ -22,8 +25,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     root = args.output_dir
     result = run_active_learning(
-        experience_path=root / "experiences.jsonl",
-        transition_path=root / "transitions.jsonl",
+        experience_path=args.experience_path or root / "experiences.jsonl",
+        transition_path=args.transition_path or root / "transitions.jsonl",
         artifact_dir=root,
         strategy=args.strategy,
         task_config=PandaReachConfig(max_episode_steps=args.max_episode_steps),
@@ -31,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
         bootstrap_episodes=args.bootstrap_episodes,
         iterations=args.iterations,
         candidate_count=args.candidate_count,
+        initial_model_path=args.model,
     )
     print(f"Strategy: {result['strategy']}; bounded selection iterations: {result['requested_iterations']}")
     print(f"Run summary: {root / 'run_summary.json'}")

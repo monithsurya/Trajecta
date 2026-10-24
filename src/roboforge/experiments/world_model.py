@@ -112,14 +112,17 @@ class EpisodeSplit:
     train: np.ndarray
     validation: np.ndarray
     test: np.ndarray
+    train_episode_ids: tuple[str, ...]
+    validation_episode_ids: tuple[str, ...]
+    test_episode_ids: tuple[str, ...]
 
 
 def split_episodes(episode_ids: Any, *, seed: int = 0) -> EpisodeSplit:
     """Deterministically split transitions by whole episode, never by row."""
     ids = np.asarray(episode_ids, dtype=str)
     unique = np.unique(ids)
-    if unique.size < 3:
-        raise ValueError("at least three distinct episodes are required for train/validation/test splits")
+    if unique.size < 5:
+        raise ValueError("at least five distinct episodes are required for train/validation/test splits")
     rng = np.random.default_rng(seed)
     shuffled = unique.copy()
     rng.shuffle(shuffled)
@@ -134,6 +137,9 @@ def split_episodes(episode_ids: Any, *, seed: int = 0) -> EpisodeSplit:
         train=np.flatnonzero(np.isin(ids, list(train_ids))),
         validation=np.flatnonzero(np.isin(ids, list(validation_ids))),
         test=np.flatnonzero(np.isin(ids, list(test_ids))),
+        train_episode_ids=tuple(sorted(str(value) for value in train_ids)),
+        validation_episode_ids=tuple(sorted(str(value) for value in validation_ids)),
+        test_episode_ids=tuple(sorted(str(value) for value in test_ids)),
     )
 
 
@@ -199,6 +205,7 @@ class EnsembleRidgeWorldModel:
         self.observation_size: int | None = None
         self.action_size: int | None = None
         self.training_episode_ids: tuple[str, ...] = ()
+        self.provenance: dict[str, Any] = {}
 
     def fit(self, arrays: TransitionArrays, train_indices: np.ndarray) -> "EnsembleRidgeWorldModel":
         indices = np.asarray(train_indices, dtype=int)
@@ -265,6 +272,18 @@ class EnsembleRidgeWorldModel:
     def predict(self, observation: Any, action: Any) -> np.ndarray:
         return np.mean(self.predict_ensemble(observation, action), axis=0)
 
+    def predict_full_observation(self, observation: Any, action: Any) -> np.ndarray:
+        """Predict a full PandaReachEnv observation, preserving excluded fixed-base fields."""
+        full = _finite_vector(
+            observation,
+            name="full reach observation",
+            expected_size=PANDA_REACH_OBSERVATION_SIZE,
+        )
+        predicted_features = self.predict(reach_state_features(full), action)
+        result = full.copy()
+        result[np.asarray(REACH_FEATURE_INDICES, dtype=int)] = predicted_features
+        return result
+
     def uncertainty(self, observation: Any, action: Any) -> float:
         """Mean ensemble spread normalized by training target scales (dimensionless)."""
         if self.delta_scale is None:
@@ -311,6 +330,8 @@ class EnsembleRidgeWorldModel:
                 raise ValueError("incompatible world model artifact schema or model kind")
             if metadata.get("feature_schema") != FEATURE_SCHEMA:
                 raise ValueError("incompatible Panda reach feature schema")
+            if not isinstance(metadata.get("provenance", {}), dict):
+                raise ValueError("world model artifact provenance must be an object")
             model = cls(members=int(metadata["members"]), ridge=float(metadata["ridge"]), seed=int(metadata["seed"]))
             model.observation_size = int(metadata["observation_size"])
             model.action_size = int(metadata["action_size"])
@@ -320,6 +341,7 @@ class EnsembleRidgeWorldModel:
             model.delta_scale = np.asarray(artifact["delta_scale"], dtype=np.float64)
             model.coefficients = np.asarray(artifact["coefficients"], dtype=np.float64)
             model.training_episode_ids = tuple(metadata.get("training_episode_ids", ()))
+            model.provenance = metadata.get("provenance", {})
         if not all(np.isfinite(array).all() for array in (
             model.input_mean, model.input_scale, model.delta_mean, model.delta_scale, model.coefficients,
         )):
@@ -406,6 +428,9 @@ def train_world_model(
             train=np.flatnonzero(np.isin(arrays.episode_ids, list(train_ids))),
             validation=np.flatnonzero(np.isin(arrays.episode_ids, list(validation_ids))),
             test=np.flatnonzero(np.isin(arrays.episode_ids, list(test_ids))),
+            train_episode_ids=tuple(sorted(train_ids)),
+            validation_episode_ids=tuple(sorted(validation_ids)),
+            test_episode_ids=tuple(sorted(test_ids)),
         )
     model = EnsembleRidgeWorldModel(members=members, ridge=ridge, seed=seed)
     model.fit(arrays, splits.train)
@@ -432,5 +457,17 @@ def train_world_model(
         "dataset_sha256": hashlib.sha256(
             "".join(record.model_dump_json() + "\n" for record in dataset.records).encode("utf-8")
         ).hexdigest(),
+        "training_data_sha256": hashlib.sha256(
+            "".join(
+                record.model_dump_json() + "\n"
+                for record in dataset.records
+                if str(record.episode_id) in set(splits.train_episode_ids)
+            ).encode("utf-8")
+        ).hexdigest(),
     }
     return model, reports, arrays, splits
+
+
+def load_world_model(path: str | Path) -> EnsembleRidgeWorldModel:
+    """Load a versioned reach world-model artifact."""
+    return EnsembleRidgeWorldModel.load(path)
