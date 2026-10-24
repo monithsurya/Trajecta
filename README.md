@@ -35,7 +35,7 @@ Robotics experiments need clear task outcomes, repeatable configurations, and tr
 | Step-level transition recording | Implemented as optional versioned JSONL records with validated loading and manifests |
 | Failure diagnosis | Initial deterministic evidence-linked rules; hypotheses, not causal conclusions |
 | Dataset filtering, manifest, export, grouped split | Implemented for episode summary records |
-| Controller calibration and system identification | Not implemented |
+| Controller calibration | Partially implemented: bounded Panda joint-setpoint gain sweep and paired tracking evaluation; physical dynamics system identification is not implemented |
 | Reinforcement learning | Not implemented |
 | Learned dynamics/world model | Not implemented |
 | Uncertainty-aware experiment selection | Not implemented |
@@ -56,6 +56,9 @@ flowchart LR
   Result --> Record[ExperienceRecord]
   Record --> Store[JSONL experience store]
   Task --> Transitions[Optional transition JSONL store]
+  Calibration[Panda gain calibration] --> Controller
+  Calibration --> Env
+  Calibration --> CalibrationStore[Calibration result JSONL]
   Store --> Dataset[Dataset filtering and grouped split]
   Store --> Failure[Deterministic failure diagnosis]
 ```
@@ -140,6 +143,14 @@ Record a 1080p, 50 FPS MP4 and task-phase stills:
 python examples/record_pick_place.py --seed 0 --output media/trajecta_pick_and_place_1080p.mp4 --frames-dir media/frames --width 1920 --height 1080 --fps 50
 ```
 
+Run a reproducible controller-gain calibration sweep:
+
+```bash
+python examples/calibrate_panda_controller.py --episodes 3 --seed 0 --candidate-kp 0.25 0.5 0.75 1.0
+```
+
+This compares the existing direct-target baseline with bounded candidate gains under the same reset seeds and joint-target offsets. It saves validated calibration results and step transitions under `artifacts/`; acceptance requires at least two paired episodes plus the configured RMSE improvement, settling, and constraint checks. Acceptance never changes the controller default automatically. See [controller calibration](docs/calibration.md) for the objective, metrics, and limits.
+
 Run tests:
 
 ```bash
@@ -156,9 +167,9 @@ The video renderer reports the actual outcome and measured placement error. Scre
 
 ## Limitations and roadmap
 
-Current task/controller assumptions are specific to the bundled Panda scene. Episode summaries remain episode-level; optional step records capture the environment's zero reward and are a recording facility, not a policy-training or learned-dynamics pipeline. Calibration, policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
+Current task/controller assumptions are specific to the bundled Panda scene. Episode summaries remain episode-level; optional step records capture the environment's zero reward and are a recording facility, not a policy-training or learned-dynamics pipeline. Calibration currently tunes the controller's setpoint blend gain; identifying physical dynamics such as mass, friction, or actuator response remains future work. Policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
 
-Roadmap: (1) expand randomized held-out task evaluation; (2) add bounded controller calibration; (3) train/evaluate a policy and a narrowly scoped dynamics baseline; (4) measure candidate selection against a random baseline; (5) define and validate any hardware boundary independently. Transition capture is a data-recording facility only; it does not implement reinforcement learning, a learned world model, or adaptive experiment selection.
+Roadmap: (1) expand randomized held-out task evaluation; (2) identify measurable MuJoCo actuator/robot dynamics beyond command gain; (3) train/evaluate a policy and a narrowly scoped learned dynamics baseline; (4) measure candidate selection against a random baseline; (5) define and validate any hardware boundary independently. Transition capture is a data-recording facility only; it does not implement reinforcement learning, a learned world model, or adaptive experiment selection.
 
 ## Contribution, license, and attribution
 

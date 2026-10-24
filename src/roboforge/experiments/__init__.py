@@ -22,6 +22,17 @@ from roboforge.experiments.transitions import (
     TransitionRecord,
     TransitionRecorder,
 )
+from roboforge.experiments.calibration import (
+    CalibrationRunRecord,
+    GainEvaluation,
+    JsonlCalibrationStore,
+    PandaControllerCalibrator,
+    TrackingCalibrationSpec,
+    TrackingTrial,
+    compute_tracking_metrics,
+    decide_candidate,
+    estimate_setpoint_gain,
+)
 
 __all__ = [
     "MAX_SEED_VALUE",
@@ -45,4 +56,13 @@ __all__ = [
     "TransitionDataset",
     "TransitionRecord",
     "TransitionRecorder",
+    "CalibrationRunRecord",
+    "GainEvaluation",
+    "JsonlCalibrationStore",
+    "PandaControllerCalibrator",
+    "TrackingCalibrationSpec",
+    "TrackingTrial",
+    "compute_tracking_metrics",
+    "decide_candidate",
+    "estimate_setpoint_gain",
 ]

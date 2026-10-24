@@ -16,7 +16,13 @@ class PandaEndEffectorPositionController:
     normal normalized environment action vector, leaving the gripper slot open.
     """
 
-    def __init__(self, env: MujocoRobotEnvironment, *, position_tolerance: float = 0.005) -> None:
+    def __init__(
+        self,
+        env: MujocoRobotEnvironment,
+        *,
+        position_tolerance: float = 0.005,
+        kp: float | list[float] | np.ndarray | None = None,
+    ) -> None:
         self.env = env
         self.ik = MujocoPositionIK(env, position_tolerance=position_tolerance)
         specs = {s["target"]: s for s in env.actuator_specs if s["transmission"] == "joint"}
@@ -31,12 +37,17 @@ class PandaEndEffectorPositionController:
             if spec["transmission"] == "tendon" and spec["target"] == "split":
                 default_action[int(spec["index"])] = 1.0
         self._controller = JointPositionController(
-            np.zeros(7), joint_limits=limits,
+            np.zeros(7), kp=kp, joint_limits=limits,
             observation_indices=self.observation_indices,
             action_size=env.action_space.shape[0], action_indices=self.action_indices,
             default_action=default_action,
         )
         self.result: IKResult | None = None
+
+    @property
+    def kp(self) -> np.ndarray | None:
+        """Return the joint target blend gain used by the wrapped controller."""
+        return self._controller.kp
 
     def set_target_position(
         self,

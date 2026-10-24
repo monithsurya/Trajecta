@@ -12,6 +12,7 @@ Trajecta is a single Python package with explicit interfaces between experiment 
 - **Runner and evaluation** (`experiments/runner.py`, `evaluation.py`): derive per-episode seeds from the spec, invoke a task, create episode records, and aggregate explicit task outcomes.
 - **Experience** (`experiments/experience.py`, `dataset.py`): validate schema-versioned episode summaries, append JSONL, filter records, manifest datasets, and split records by experiment ID.
 - **Failure analysis** (`experiments/failure_analysis.py`): deterministic string/phase rules yield a category, observed evidence, a qualified hypothesis, and a next investigation.
+- **Controller calibration** (`experiments/calibration.py`): paired seeded Panda joint-target trials compare the default direct setpoint against bounded blend gains, estimate the commanded blend from normalized actions, and persist tracking evidence without changing controller defaults.
 - **Visualization and examples** (`visualization/`, `examples/`): optional viewer, task/evaluation examples, and headless video capture.
 
 ## Data flow
@@ -36,4 +37,4 @@ sequenceDiagram
 
 ## Boundaries and limitations
 
-Stored records describe episodes, not transitions. No RL learner or learned dynamics implementation consumes them. Failure categories are not causal claims. The environment is simulation-only; there is no physical robot interface or safety controller. The task currently uses the fixed cube and destination in the bundled scene, so seeds do not provide domain randomization.
+Episode summaries describe episodes; optional transition records contain per-step data. No RL learner or learned dynamics implementation consumes them. Failure categories are not causal claims. The environment is simulation-only; there is no physical robot interface or safety controller. The task currently uses the fixed cube and destination in the bundled scene, so task seeds do not provide domain randomization. Calibration estimates the controller setpoint blend only; it does not identify physical robot or actuator dynamics.
