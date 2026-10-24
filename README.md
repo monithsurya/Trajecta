@@ -30,6 +30,7 @@ Robotics experiments need clear task outcomes, repeatable configurations, and tr
 | Joint/gripper actuation and action mapping | Implemented; normalized action maps by MuJoCo actuator order and control ranges |
 | Inverse kinematics and end-effector positioning | Implemented and unit-tested |
 | Pick-and-place execution | Implemented with bilateral contact, lift, release, and placement checks |
+| Adaptive manipulation | Partially implemented: seeded block/goal/joint/physics variation, live-object replanning, and up to three bounded grasp-height retries; simulation only |
 | Experiment runner and episode evaluation | Implemented; seeded episode sequence and summary metrics |
 | Episode experience persistence | Implemented as validated JSONL summaries |
 | Step-level transition recording | Implemented as optional versioned JSONL records with validated loading and manifests |
@@ -39,7 +40,8 @@ Robotics experiments need clear task outcomes, repeatable configurations, and tr
 | Reinforcement learning | Partially implemented: optional PPO training and paired evaluation for Panda reaching; no learned pick-and-place policy |
 | Learned dynamics/world model | Partially implemented research prototype: predicts 24 Panda reach joint/task deltas; variable held-out performance and not better than persistence in every seed |
 | Uncertainty-aware experiment selection | Partially implemented research prototype: bounded Panda reach target selection by ensemble disagreement; small comparison is inconclusive on reliable benefit |
-| Physical robot integration and sim-to-real evaluation | Not implemented |
+| Robot backend boundary | Partially implemented: capability-reporting MuJoCo Panda adapter and validated command contract; hardware adapter is absent and disabled |
+| Physical robot integration and sim-to-real evaluation | Not implemented; no physical hardware testing |
 
 ## Architecture and data flow
 
@@ -69,6 +71,8 @@ flowchart LR
   Calibration[Panda gain calibration] --> Controller
   Calibration --> Env
   Calibration --> CalibrationStore[Calibration result JSONL]
+  BackendContract[RobotBackend protocol] --> MujocoBackend[MuJoCo Panda backend]
+  BackendContract -. not implemented .-> Hardware[No hardware adapter]
   Store --> Dataset[Dataset filtering and grouped split]
   Store --> Failure[Deterministic failure diagnosis]
 ```
@@ -180,6 +184,15 @@ python examples/compare_selection_strategies.py --seeds 0 1 2 --bootstrap-episod
 ```
 
 The reach-only model, uncertainty proxy, split protocol, logs, and scientific limits are documented in [predictive learning and experiment selection](docs/predictive_learning.md).
+
+Run paired nominal or varied-condition manipulation evaluation. The varied suite samples block and target positions, small valid robot joint offsets, and bounded cube mass/friction scalings from each seed:
+
+```bash
+python examples/evaluate_adaptive_manipulation.py --episodes 5 --seed 0
+python examples/evaluate_adaptive_manipulation.py --episodes 10 --seed 100 --vary-conditions --max-recovery-attempts 2
+```
+
+The report includes paired baseline/adaptive outcomes, grasp and placement verification, errors, steps, recovery attempts, failure categories, sampled parameters, and runtime. See [adaptive manipulation and readiness](docs/adaptive_manipulation.md) for what the simulator enforces and what physical deployment still needs.
 
 Run tests:
 

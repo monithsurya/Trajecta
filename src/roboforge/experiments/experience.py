@@ -39,6 +39,10 @@ class ExperienceRecord(BaseModel):
     phase_history: tuple[str, ...] = ()
     failure_reason: str | None = None
     controller_config: dict[str, Any] | None = None
+    condition_parameters: dict[str, Any] | None = None
+    failure_category: str | None = None
+    recovery_attempts: int = Field(default=0, ge=0)
+    replanning_count: int = Field(default=0, ge=0)
 
     @model_validator(mode="before")
     @classmethod
@@ -102,6 +106,10 @@ def experience_from_result(
         phase_history=tuple(getattr(result, "phase_history", ()) or ()),
         failure_reason=getattr(result, "failure_reason", None),
         controller_config=controller_config,
+        condition_parameters=getattr(result, "condition_parameters", None),
+        failure_category=getattr(result, "failure_category", None),
+        recovery_attempts=getattr(result, "recovery_attempts", 0),
+        replanning_count=getattr(result, "replanning_count", 0),
     )
 
 

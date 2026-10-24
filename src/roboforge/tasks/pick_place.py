@@ -35,8 +35,19 @@ class TaskPhase(str, Enum):
 
 @dataclass(frozen=True)
 class PickPlaceConfig:
+    cube_start_position_m: tuple[float, float, float] | None = None
     cube_target_position_m: tuple[float, float, float] | None = None
+    cube_start_bounds_m: tuple[tuple[float, float, float], tuple[float, float, float]] | None = None
     destination_xy_m: tuple[float, float] = (0.65, -0.15)
+    destination_bounds_xy_m: tuple[tuple[float, float], tuple[float, float]] | None = None
+    robot_initial_joint_positions_rad: tuple[float, ...] | None = None
+    robot_joint_perturbation_rad: float = 0.0
+    cube_mass_scale_range: tuple[float, float] = (1.0, 1.0)
+    cube_friction_scale_range: tuple[float, float] = (1.0, 1.0)
+    max_recovery_attempts: int = 0
+    max_replans_per_phase: int = 2
+    object_replan_threshold_m: float = 0.01
+    recovery_grasp_offsets_m: tuple[float, ...] = (0.0, -0.005, 0.005)
     cube_body_name: str = "target_cube"
     cube_geom_name: str = "cube_geom"
     table_geom_name: str = "table"
@@ -65,10 +76,47 @@ class PickPlaceConfig:
     def __post_init__(self) -> None:
         if len(self.destination_xy_m) != 2 or not np.isfinite(self.destination_xy_m).all():
             raise ValueError("destination_xy_m must contain two finite world coordinates")
-        if self.cube_target_position_m is not None and (
-            len(self.cube_target_position_m) != 3 or not np.isfinite(self.cube_target_position_m).all()
+        if self.destination_bounds_xy_m is not None:
+            if len(self.destination_bounds_xy_m) != 2 or any(len(vector) != 2 for vector in self.destination_bounds_xy_m):
+                raise ValueError("destination_bounds_xy_m must contain finite XY low/high vectors")
+            low, high = (np.asarray(vector, dtype=np.float64) for vector in self.destination_bounds_xy_m)
+            if not np.isfinite(low).all() or not np.isfinite(high).all() or np.any(low >= high):
+                raise ValueError("destination_bounds_xy_m low values must be below high values")
+        for name in ("cube_start_position_m", "cube_target_position_m"):
+            position = getattr(self, name)
+            if position is not None and (len(position) != 3 or not np.isfinite(position).all()):
+                raise ValueError(f"{name} must be three finite world coordinates")
+        if self.cube_start_position_m is not None and self.cube_target_position_m is not None and not np.allclose(
+            self.cube_start_position_m, self.cube_target_position_m,
         ):
-            raise ValueError("cube_target_position_m must be three finite world coordinates")
+            raise ValueError("cube_start_position_m and legacy cube_target_position_m cannot disagree")
+        if self.cube_start_bounds_m is not None:
+            if len(self.cube_start_bounds_m) != 2 or any(len(vector) != 3 for vector in self.cube_start_bounds_m):
+                raise ValueError("cube_start_bounds_m must contain finite XYZ low/high vectors")
+            low, high = (np.asarray(vector, dtype=np.float64) for vector in self.cube_start_bounds_m)
+            if not np.isfinite(low).all() or not np.isfinite(high).all() or np.any(low > high) or np.all(low == high):
+                raise ValueError("cube_start_bounds_m low values must be finite and no greater than high values")
+        if self.robot_initial_joint_positions_rad is not None and (
+            len(self.robot_initial_joint_positions_rad) != 7
+            or not np.isfinite(self.robot_initial_joint_positions_rad).all()
+        ):
+            raise ValueError("robot_initial_joint_positions_rad must contain seven finite values")
+        if not np.isfinite(self.robot_joint_perturbation_rad) or not 0 <= self.robot_joint_perturbation_rad <= 0.15:
+            raise ValueError("robot_joint_perturbation_rad must be in [0, 0.15]")
+        for name in ("cube_mass_scale_range", "cube_friction_scale_range"):
+            value = getattr(self, name)
+            if len(value) != 2 or not np.isfinite(value).all() or not 0.5 <= value[0] <= value[1] <= 1.5:
+                raise ValueError(f"{name} must be ordered finite bounds within [0.5, 1.5]")
+        if isinstance(self.max_recovery_attempts, bool) or not 0 <= self.max_recovery_attempts <= 3:
+            raise ValueError("max_recovery_attempts must be between 0 and 3")
+        if isinstance(self.max_replans_per_phase, bool) or not 0 <= self.max_replans_per_phase <= 5:
+            raise ValueError("max_replans_per_phase must be between 0 and 5")
+        if not np.isfinite(self.object_replan_threshold_m) or not 0.002 <= self.object_replan_threshold_m <= 0.05:
+            raise ValueError("object_replan_threshold_m must be in [0.002, 0.05]")
+        if not self.recovery_grasp_offsets_m or any(
+            not np.isfinite(value) or abs(value) > 0.01 for value in self.recovery_grasp_offsets_m
+        ):
+            raise ValueError("recovery_grasp_offsets_m must contain bounded offsets within +/-0.01 m")
         for name in (
             "safe_approach_height_m", "lift_height_m", "retreat_height_m",
             "hand_to_fingertip_m", "position_tolerance_m", "placement_tolerance_m",
@@ -96,6 +144,10 @@ class PickPlaceResult:
     final_cube_position_m: tuple[float, float, float]
     final_placement_error_m: float | None
     grasp_verified: bool
+    recovery_attempts: int = 0
+    replanning_count: int = 0
+    failure_category: str | None = None
+    condition_parameters: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -134,6 +186,10 @@ class PickPlaceTask:
         self._transition_episode_id: UUID | None = None
         self._transition_seed: int | None = None
         self._transition_index = 0
+        self.condition_parameters: dict[str, Any] = {}
+        self.replanning_count = 0
+        self._phase_replans = 0
+        self._phase_cube_reference: np.ndarray | None = None
 
     def configure_transition_recording(
         self, *, recorder: TransitionRecorder | None, experiment_id: UUID, episode_id: UUID,
@@ -148,8 +204,47 @@ class PickPlaceTask:
 
     def reset(self, *, seed: int | None = None) -> np.ndarray:
         """Reset to the model home key and initialize targets from live geometry."""
-        self._obs, _ = self.env.reset(seed=seed)
-        self.controller.reset()
+        rng = np.random.default_rng(seed)
+        destination_xy = self.config.destination_xy_m
+        if self.config.destination_bounds_xy_m is not None:
+            low, high = self.config.destination_bounds_xy_m
+            destination_xy = tuple(float(value) for value in rng.uniform(low, high))
+        cube_position = self.config.cube_start_position_m or self.config.cube_target_position_m
+        if cube_position is None and self.config.cube_start_bounds_m is not None:
+            low, high = self.config.cube_start_bounds_m
+            cube_position = tuple(float(value) for value in rng.uniform(low, high))
+        robot_positions = self.config.robot_initial_joint_positions_rad
+        if robot_positions is None and self.config.robot_joint_perturbation_rad > 0:
+            home_key = mujoco.mj_name2id(self.env.model, mujoco.mjtObj.mjOBJ_KEY, "home")
+            home_qpos = self.env.model.key_qpos[home_key] if home_key >= 0 else self.env.model.qpos0
+            joint_names = tuple(f"joint{i}" for i in range(1, 8))
+            nominal = []
+            for name in joint_names:
+                joint_id = self.env.joint_index(name)
+                nominal.append(home_qpos[self.env.model.jnt_qposadr[joint_id]])
+            robot_positions = tuple(float(value) for value in (
+                np.asarray(nominal) + rng.uniform(
+                    -self.config.robot_joint_perturbation_rad,
+                    self.config.robot_joint_perturbation_rad,
+                    size=7,
+                )
+            ))
+        mass_scale = float(rng.uniform(*self.config.cube_mass_scale_range))
+        friction_scale = float(rng.uniform(*self.config.cube_friction_scale_range))
+        reset_options = {"physics_variation": {
+            "cube_mass_scale": mass_scale,
+            "cube_friction_scale": friction_scale,
+        }}
+        if cube_position is not None:
+            reset_options["cube_position_m"] = cube_position
+        if robot_positions is not None:
+            reset_options["joint_positions"] = {
+                f"joint{index + 1}": value for index, value in enumerate(robot_positions)
+            }
+        if cube_position is not None or robot_positions is not None or mass_scale != 1.0 or friction_scale != 1.0:
+            self._obs, _reset_info = self.env.reset(seed=seed, options=reset_options)
+        else:
+            self._obs, _reset_info = self.env.reset(seed=seed)
         model, data = self.env.model, self.env.data
         self._cube_body_id = self._named_id(mujoco.mjtObj.mjOBJ_BODY, self.config.cube_body_name)
         self._cube_geom_id = self._named_id(mujoco.mjtObj.mjOBJ_GEOM, self.config.cube_geom_name)
@@ -160,16 +255,24 @@ class PickPlaceTask:
         self._hand_body = self.controller.ik.body_id
         self._cube_half_height = float(model.geom_size[self._cube_geom_id, 2])
         self._table_top = float(model.geom_pos[self._table_geom_id, 2] + model.geom_size[self._table_geom_id, 2])
+        self.condition_parameters = {
+            "seed": seed,
+            "cube_position_m": tuple(float(value) for value in self._cube_position()),
+            "destination_xy_m": tuple(float(value) for value in destination_xy),
+            "robot_initial_joint_positions_rad": {
+                f"joint{index + 1}": float(self.env.data.qpos[self.env.model.jnt_qposadr[self.env.joint_index(f"joint{index + 1}")]])
+                for index in range(7)
+            },
+            "cube_mass_scale": mass_scale,
+            "cube_friction_scale": friction_scale,
+            "replanning_count": 0,
+        }
+        self.controller.reset()
+        model, data = self.env.model, self.env.data
         self._cube_initial = data.xpos[self._cube_body_id].copy()
-        if self.config.cube_target_position_m is not None:
-            configured_cube_target = np.asarray(self.config.cube_target_position_m, dtype=np.float64)
-            if np.linalg.norm(self._cube_initial - configured_cube_target) > self.config.position_tolerance_m:
-                raise ValueError(
-                    "cube_target_position_m does not match the cube's actual reset position; "
-                    "the task will not move the cube to satisfy it"
-                )
+        self._validate_cube_position(self._cube_initial)
         self._destination = np.array([
-            self.config.destination_xy_m[0], self.config.destination_xy_m[1],
+            destination_xy[0], destination_xy[1],
             self._table_top + self._cube_half_height,
         ], dtype=np.float64)
         table_center = model.geom_pos[self._table_geom_id]
@@ -184,6 +287,8 @@ class PickPlaceTask:
         self._arm_dof_indices = self.controller.ik.dof_indices.copy()
         self._gripper_action_index = self._find_gripper_action()
         self._grasp_verified = False
+        self.replanning_count = 0
+        self._phase_replans = 0
         self._grasp_confirmed_at = None
         self._cube_position_before_lift = None
         self.result = None
@@ -191,6 +296,14 @@ class PickPlaceTask:
         self.episode_length = 0
         self._enter_phase(TaskPhase.APPROACH)
         return self._obs.copy()
+
+    def _validate_cube_position(self, position: np.ndarray) -> None:
+        table_center = self.env.model.geom_pos[self._table_geom_id]
+        table_half_size = self.env.model.geom_size[self._table_geom_id]
+        if any(abs(position[axis] - table_center[axis]) > table_half_size[axis] - self._cube_half_height for axis in (0, 1)):
+            raise ValueError("cube start position must keep the block fully within the table footprint")
+        if abs(position[2] - (self._table_top + self._cube_half_height)) > 0.02:
+            raise ValueError("cube start position must place the block on the table surface")
 
     def _named_id(self, kind: mujoco.mjtObj, name: str) -> int:
         result = mujoco.mj_name2id(self.env.model, kind, name)
@@ -213,7 +326,7 @@ class PickPlaceTask:
         ])
 
     def _phase_target_for(self, phase: TaskPhase) -> np.ndarray | None:
-        cube = self._cube_initial
+        cube = self._cube_position()
         if phase in (TaskPhase.APPROACH, TaskPhase.ALIGN, TaskPhase.DESCEND):
             return self._hand_target(cube, extra_height=(
                 self.config.safe_approach_height_m
@@ -230,10 +343,13 @@ class PickPlaceTask:
         return None
 
     def _enter_phase(self, phase: TaskPhase) -> None:
+        if phase != self.phase:
+            self._phase_replans = 0
         self.phase = phase
         self.phase_elapsed = 0.0
         self.phase_history.append(phase.value)
         self._phase_target = self._phase_target_for(phase)
+        self._phase_cube_reference = self._cube_position().copy()
         self._target_q = None
         self._phase_start_q = self.env.data.qpos[self._arm_qpos_indices].copy() if hasattr(self, "_arm_qpos_indices") else None
         if self._phase_target is not None:
@@ -288,6 +404,7 @@ class PickPlaceTask:
             if placement_attempted else None
         )
         phase = TaskPhase.SUCCESS if success else TaskPhase.FAILURE
+        failure_category = None if success else self.classify_failure(reason or "", self.phase)
         self.phase = phase
         self.phase_history.append(phase.value)
         self.result = PickPlaceResult(
@@ -299,7 +416,26 @@ class PickPlaceTask:
             final_cube_position_m=tuple(float(x) for x in final),
             final_placement_error_m=placement_error,
             grasp_verified=self._grasp_verified,
+            failure_category=failure_category,
+            condition_parameters={**self.condition_parameters, "replanning_count": self.replanning_count},
+            replanning_count=self.replanning_count,
         )
+
+    @staticmethod
+    def classify_failure(reason: str, phase: TaskPhase) -> str:
+        """Coarse outcome category for recovery/evaluation, not a causal diagnosis."""
+        lowered = reason.lower()
+        if any(token in lowered for token in ("grasp", "finger contact", "contact on both")):
+            return "missed_grasp"
+        if any(token in lowered for token in ("ik", "timed out", "timeout", "reach")):
+            return "failed_reach"
+        if any(token in lowered for token in ("placement", "destination", "table after release", "released cube")):
+            return "placement_failure"
+        if phase in (TaskPhase.CLOSE_GRIPPER, TaskPhase.VERIFY_GRASP, TaskPhase.LIFT):
+            return "missed_grasp"
+        if phase in (TaskPhase.PLACE, TaskPhase.RELEASE, TaskPhase.VERIFY_PLACEMENT, TaskPhase.TRANSPORT):
+            return "placement_failure"
+        return "task_failure"
 
     def _advance(self) -> None:
         transitions = {
@@ -359,6 +495,19 @@ class PickPlaceTask:
             raise RuntimeError("Call reset() before stepping the task")
         if self.result is not None:
             return TaskStep(self._obs.copy(), 0.0, False, False, {}, self.phase, self.result)
+        if self.phase in (TaskPhase.APPROACH, TaskPhase.ALIGN, TaskPhase.DESCEND) and self._phase_cube_reference is not None:
+            current_cube = self._cube_position()
+            if np.linalg.norm(current_cube - self._phase_cube_reference) > self.config.object_replan_threshold_m:
+                if self._phase_replans >= self.config.max_replans_per_phase:
+                    self._finish(False, f"object moved during {self.phase.value}; replan budget exhausted")
+                    return TaskStep(
+                        self._obs.copy(), 0.0, True, False,
+                        {"failure_reason": self.result.failure_reason}, self.phase, self.result,
+                    )
+                self._phase_replans += 1
+                self.replanning_count += 1
+                self.condition_parameters["replanning_count"] = self.replanning_count
+                self._enter_phase(self.phase)
         dt = float(self.env.model.opt.timestep * self.env.n_substeps)
         self.phase_elapsed += dt
         action = self.controller.compute_action(self._obs)
@@ -458,7 +607,7 @@ class PickPlaceTask:
                             return
                     self._advance()
 
-    def run(self, *, seed: int | None = None, max_steps: int = 5000) -> PickPlaceResult:
+    def _run_once(self, *, seed: int | None, max_steps: int) -> PickPlaceResult:
         self.reset(seed=seed)
         for _ in range(max_steps):
             step = self.step()
@@ -469,3 +618,61 @@ class PickPlaceTask:
                 return self.result
         self._finish(False, f"task exceeded max_steps={max_steps}")
         return self.result
+
+    def run(self, *, seed: int | None = None, max_steps: int = 5000) -> PickPlaceResult:
+        """Run a bounded episode and retry only classified recoverable failures."""
+        base_config = self.config
+        recovery_outcomes: list[str] = []
+        attempt_conditions: list[dict[str, Any]] = []
+        total_steps = 0
+        result: PickPlaceResult | None = None
+        try:
+            for attempt in range(base_config.max_recovery_attempts + 1):
+                offset = base_config.recovery_grasp_offsets_m[
+                    min(attempt, len(base_config.recovery_grasp_offsets_m) - 1)
+                ]
+                from dataclasses import replace
+                self.config = replace(
+                    base_config,
+                    hand_to_fingertip_m=base_config.hand_to_fingertip_m + offset,
+                    max_recovery_attempts=0,
+                )
+                retry_seed = None if seed is None else (seed + attempt) % (4_294_967_295 + 1)
+                result = self._run_once(seed=retry_seed, max_steps=max_steps)
+                total_steps += result.episode_length
+                attempt_conditions.append(dict(result.condition_parameters))
+                if result.success:
+                    return replace(
+                        result,
+                        episode_length=total_steps,
+                        recovery_attempts=attempt,
+                        replanning_count=result.replanning_count,
+                        condition_parameters={
+                            **result.condition_parameters,
+                            "recovery_outcomes": tuple(recovery_outcomes),
+                            "recovery_attempts": attempt,
+                            "attempt_conditions": tuple(attempt_conditions),
+                        },
+                    )
+                category = result.failure_category or self.classify_failure(
+                    result.failure_reason or "", self.phase,
+                )
+                recovery_outcomes.append(category)
+                if category not in {"missed_grasp", "failed_reach", "placement_failure"}:
+                    break
+            assert result is not None
+            return replace(
+                result,
+                episode_length=total_steps,
+                recovery_attempts=max(0, len(recovery_outcomes) - 1),
+                replanning_count=result.replanning_count,
+                failure_category=result.failure_category or "task_failure",
+                condition_parameters={
+                    **result.condition_parameters,
+                    "recovery_outcomes": tuple(recovery_outcomes),
+                    "recovery_attempts": max(0, len(recovery_outcomes) - 1),
+                    "attempt_conditions": tuple(attempt_conditions),
+                },
+            )
+        finally:
+            self.config = base_config

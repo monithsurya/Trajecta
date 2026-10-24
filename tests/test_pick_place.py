@@ -12,7 +12,7 @@ from roboforge.environments.mujoco_env import MujocoRobotEnvironment
 from roboforge.experiments.evaluation import ExperimentEvaluator
 from roboforge.experiments.experience import experience_from_result
 from roboforge.experiments.transitions import JsonlTransitionStore, TransitionDataset
-from roboforge.tasks.pick_place import PickPlaceConfig, PickPlaceTask, TaskPhase
+from roboforge.tasks.pick_place import PickPlaceConfig, PickPlaceResult, PickPlaceTask, TaskPhase
 
 
 class FakeEnvironment:
@@ -112,6 +112,19 @@ def test_fake_release_action_uses_open_gripper_command(fake_task):
     assert env.actions[-1][task._gripper_action_index] == 1.0
 
 
+def test_pick_place_replans_from_live_cube_position_with_bounded_count(fake_task):
+    task, env = fake_task
+    cube_body = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "target_cube")
+    cube_joint = int(env.model.body_jntadr[cube_body])
+    qpos_address = int(env.model.jnt_qposadr[cube_joint])
+    env.data.qpos[qpos_address] += 0.02
+    mujoco.mj_forward(env.model, env.data)
+    before = len(task.phase_history)
+    task.step()
+    assert task.replanning_count == 1
+    assert len(task.phase_history) == before + 1
+
+
 def test_step_recording_is_optional_and_persists_completed_step_on_task_error(fake_task, tmp_path):
     task, env = fake_task
     task._check_phase_progress = lambda dt: None
@@ -138,6 +151,67 @@ def test_pick_place_config_rejects_invalid_destination():
         PickPlaceConfig(destination_xy_m=(np.nan, 0.0))
 
 
+def test_pick_place_config_rejects_unsafe_variation_and_recovery_bounds():
+    with pytest.raises(ValueError, match="mass_scale_range"):
+        PickPlaceConfig(cube_mass_scale_range=(0.1, 1.0))
+    with pytest.raises(ValueError, match="max_recovery_attempts"):
+        PickPlaceConfig(max_recovery_attempts=4)
+    with pytest.raises(ValueError, match="joint_perturbation"):
+        PickPlaceConfig(robot_joint_perturbation_rad=0.5)
+
+
+def test_randomized_reset_conditions_are_seeded_and_recorded():
+    config = PickPlaceConfig(
+        cube_start_bounds_m=((0.40, -0.08, 0.725), (0.50, 0.08, 0.725)),
+        destination_bounds_xy_m=((0.62, -0.18), (0.68, -0.12)),
+        robot_joint_perturbation_rad=0.02,
+        cube_mass_scale_range=(0.9, 1.1),
+        cube_friction_scale_range=(0.9, 1.1),
+    )
+    env = MujocoRobotEnvironment()
+    try:
+        task = PickPlaceTask(env, PandaEndEffectorPositionController(env), config)
+        task.reset(seed=21)
+        first = dict(task.condition_parameters)
+        task.reset(seed=21)
+        assert task.condition_parameters == first
+        assert 0.9 <= task.condition_parameters["cube_mass_scale"] <= 1.1
+        assert 0.9 <= task.condition_parameters["cube_friction_scale"] <= 1.1
+        assert 0.40 <= task.condition_parameters["cube_position_m"][0] <= 0.50
+        assert 0.62 <= task.condition_parameters["destination_xy_m"][0] <= 0.68
+    finally:
+        env.close()
+
+
+def test_bounded_recovery_retries_only_classified_failure(monkeypatch):
+    env = MujocoRobotEnvironment()
+    try:
+        task = PickPlaceTask(
+            env,
+            PandaEndEffectorPositionController(env),
+            PickPlaceConfig(max_recovery_attempts=2),
+        )
+        outcomes = iter((
+            PickPlaceResult(False, "no bilateral finger contact", ("VERIFY_GRASP",), 10, (0, 0, 0), (0, 0, 0), None, False, failure_category="missed_grasp"),
+            PickPlaceResult(True, None, ("SUCCESS",), 12, (0, 0, 0), (0, 0, 0), 0.01, True),
+        ))
+        attempts = []
+
+        def fake_run_once(*, seed, max_steps):
+            attempts.append((seed, task.config.hand_to_fingertip_m))
+            return next(outcomes)
+
+        monkeypatch.setattr(task, "_run_once", fake_run_once)
+        result = task.run(seed=30)
+        assert result.success
+        assert result.recovery_attempts == 1
+        assert result.episode_length == 22
+        assert attempts[0][0] == 30 and attempts[1][0] == 31
+        assert attempts[0][1] != attempts[1][1]
+    finally:
+        env.close()
+
+
 def test_real_scene_completes_and_records_contact_verified_pick_and_place(tmp_path):
     env = MujocoRobotEnvironment(n_substeps=10, max_episode_steps=10_000)
     try:
@@ -158,6 +232,10 @@ def test_real_scene_completes_and_records_contact_verified_pick_and_place(tmp_pa
             result, task_id="pick_and_place", environment_id="mujoco_panda_scene", seed=4,
         )
         assert record.grasp_verified is True
+        assert record.failure_category is None
+        assert record.recovery_attempts == 0
+        assert record.replanning_count == 0
+        assert record.condition_parameters["cube_mass_scale"] == pytest.approx(1.0)
         assert ExperimentEvaluator().evaluate([result]).successful_episodes == 1
         transitions = TransitionDataset.from_jsonl(transition_store.path).records
         assert len(transitions) == result.episode_length

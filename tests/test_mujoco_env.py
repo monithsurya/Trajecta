@@ -108,6 +108,42 @@ class TestMujocoRobotEnvironment:
         finally:
             env.close()
 
+    def test_seeded_cube_and_physics_variations_are_recorded_and_reset_to_nominal(self) -> None:
+        env = MujocoRobotEnvironment()
+        try:
+            body_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_BODY, "target_cube")
+            geom_id = mujoco.mj_name2id(env.model, mujoco.mjtObj.mjOBJ_GEOM, "cube_geom")
+            nominal_mass = float(env.model.body_mass[body_id])
+            nominal_friction = env.model.geom_friction[geom_id].copy()
+            obs_a, info_a = env.reset(
+                seed=5,
+                options={
+                    "cube_position_m": (0.48, 0.05, 0.725),
+                    "joint_positions": {"joint1": 0.1},
+                    "physics_variation": {"cube_mass_scale": 1.2, "cube_friction_scale": 0.8},
+                },
+            )
+            assert info_a["physics_variation"] == {"cube_mass_scale": 1.2, "cube_friction_scale": 0.8}
+            assert env.model.body_mass[body_id] == pytest.approx(nominal_mass * 1.2)
+            assert env.model.geom_friction[geom_id] == pytest.approx(nominal_friction * 0.8)
+            assert env.data.qpos[env.model.jnt_qposadr[env.joint_index("joint1")]] == pytest.approx(0.1)
+            obs_b, _ = env.reset(seed=5)
+            assert env.model.body_mass[body_id] == pytest.approx(nominal_mass)
+            assert env.model.geom_friction[geom_id] == pytest.approx(nominal_friction)
+            assert not np.allclose(obs_a, obs_b)
+        finally:
+            env.close()
+
+    def test_reset_rejects_invalid_joint_limits_and_randomization(self) -> None:
+        env = MujocoRobotEnvironment()
+        try:
+            with pytest.raises(ValueError, match="outside"):
+                env.reset(options={"joint_positions": {"joint4": 0.0}})
+            with pytest.raises(ValueError, match=r"\[0.5, 1.5\]"):
+                env.reset(options={"physics_variation": {"cube_mass_scale": 3.0}})
+        finally:
+            env.close()
+
     def test_close_releases_safely(self) -> None:
         env = MujocoRobotEnvironment()
         env.reset()

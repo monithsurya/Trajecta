@@ -71,6 +71,20 @@ class MujocoRobotEnvironment:
         self._rng = np.random.default_rng()
 
         self._ctrl_ranges = self._model.actuator_ctrlrange.copy()
+        self._nominal_body_mass: dict[int, float] = {}
+        self._nominal_body_inertia: dict[int, np.ndarray] = {}
+        self._nominal_geom_friction: dict[int, np.ndarray] = {}
+        for object_type, name, store in (
+            (mujoco.mjtObj.mjOBJ_BODY, "target_cube", self._nominal_body_mass),
+            (mujoco.mjtObj.mjOBJ_GEOM, "cube_geom", self._nominal_geom_friction),
+        ):
+            object_id = mujoco.mj_name2id(self._model, object_type, name)
+            if object_id >= 0:
+                if object_type == mujoco.mjtObj.mjOBJ_BODY:
+                    store[object_id] = float(self._model.body_mass[object_id])
+                    self._nominal_body_inertia[object_id] = self._model.body_inertia[object_id].copy()
+                else:
+                    store[object_id] = self._model.geom_friction[object_id].copy()
         nu = self._model.nu
         if nu and not bool(np.all(self._model.actuator_ctrllimited)):
             raise ValueError("Every actuator must define a finite ctrlrange for normalized actions.")
@@ -227,6 +241,16 @@ class MujocoRobotEnvironment:
     ) -> tuple[np.ndarray, dict[str, Any]]:
         if self._is_closed:
             raise RuntimeError("Cannot reset a closed environment.")
+        options = options or {}
+        if not isinstance(options, dict):
+            raise ValueError("reset options must be a mapping")
+        # Restore nominal scene parameters before applying this episode's
+        # explicitly requested variation.
+        for object_id, value in self._nominal_body_mass.items():
+            self._model.body_mass[object_id] = value
+            self._model.body_inertia[object_id] = self._nominal_body_inertia[object_id]
+        for object_id, value in self._nominal_geom_friction.items():
+            self._model.geom_friction[object_id] = value
         if seed is not None:
             self._rng = np.random.default_rng(seed)
         self._step_count = 0
@@ -238,19 +262,89 @@ class MujocoRobotEnvironment:
             mujoco.mj_resetDataKeyframe(self._model, self._data, home_key)
         else:
             mujoco.mj_resetData(self._model, self._data)
-        if options and "qpos" in options:
-            qpos = np.asarray(options["qpos"], dtype=np.float64)
-            if qpos.shape == self._data.qpos.shape:
-                self._data.qpos[:] = qpos
-        if options and "qvel" in options:
+        if "qpos" in options:
+            qpos = np.array(options["qpos"], dtype=np.float64, copy=True)
+            if qpos.shape != self._data.qpos.shape or not np.isfinite(qpos).all():
+                raise ValueError(f"qpos must be a finite vector of shape {self._data.qpos.shape}")
+            for joint_id in range(self._model.njnt):
+                if int(self._model.jnt_type[joint_id]) == int(mujoco.mjtJoint.mjJNT_FREE):
+                    address = int(self._model.jnt_qposadr[joint_id]) + 3
+                    quaternion = qpos[address:address + 4]
+                    norm = float(np.linalg.norm(quaternion))
+                    if norm < 1e-8:
+                        raise ValueError("free-joint reset quaternion must have non-zero norm")
+                    qpos[address:address + 4] = quaternion / norm
+            self._data.qpos[:] = qpos
+        if "qvel" in options:
             qvel = np.asarray(options["qvel"], dtype=np.float64)
-            if qvel.shape == self._data.qvel.shape:
-                self._data.qvel[:] = qvel
+            if qvel.shape != self._data.qvel.shape or not np.isfinite(qvel).all():
+                raise ValueError(f"qvel must be a finite vector of shape {self._data.qvel.shape}")
+            self._data.qvel[:] = qvel
+        joint_positions = options.get("joint_positions", {})
+        if not isinstance(joint_positions, dict):
+            raise ValueError("joint_positions must be a mapping of named scalar joints to angles")
+        for name, value in joint_positions.items():
+            if name not in self.joint_names:
+                raise ValueError(f"unknown joint in reset configuration: {name}")
+            joint_id = self.joint_index(name)
+            joint_type = int(self._model.jnt_type[joint_id])
+            if joint_type != int(mujoco.mjtJoint.mjJNT_HINGE):
+                raise ValueError(f"reset joint {name!r} is not a hinge joint")
+            value = float(value)
+            if not np.isfinite(value):
+                raise ValueError(f"joint position for {name!r} must be finite")
+            if self._model.jnt_limited[joint_id]:
+                lower, upper = self._model.jnt_range[joint_id]
+                if not lower <= value <= upper:
+                    raise ValueError(f"joint position for {name!r} is outside [{lower}, {upper}]")
+            self._data.qpos[self._model.jnt_qposadr[joint_id]] = value
+        cube_position = options.get("cube_position_m")
+        if cube_position is not None:
+            body_id = mujoco.mj_name2id(self._model, mujoco.mjtObj.mjOBJ_BODY, "target_cube")
+            if body_id < 0 or self._model.body_jntnum[body_id] < 1:
+                raise ValueError("cube_position_m requires a target_cube body with a free joint")
+            position = np.asarray(cube_position, dtype=np.float64)
+            if position.shape != (3,) or not np.isfinite(position).all():
+                raise ValueError("cube_position_m must be a finite XYZ vector")
+            joint_id = int(self._model.body_jntadr[body_id])
+            if int(self._model.jnt_type[joint_id]) != int(mujoco.mjtJoint.mjJNT_FREE):
+                raise ValueError("target_cube must be attached to a free joint")
+            address = int(self._model.jnt_qposadr[joint_id])
+            self._data.qpos[address:address + 3] = position
+        physics_variation = options.get("physics_variation", {})
+        if not isinstance(physics_variation, dict):
+            raise ValueError("physics_variation must be a mapping")
+        mass_scale = float(physics_variation.get("cube_mass_scale", 1.0))
+        friction_scale = float(physics_variation.get("cube_friction_scale", 1.0))
+        if not np.isfinite([mass_scale, friction_scale]).all() or not (0.5 <= mass_scale <= 1.5) or not (0.5 <= friction_scale <= 1.5):
+            raise ValueError("cube mass and friction scales must be finite and in [0.5, 1.5]")
+        if mass_scale != 1.0 and not self._nominal_body_mass:
+            raise ValueError("cube mass variation requires the Panda target_cube body")
+        if friction_scale != 1.0 and not self._nominal_geom_friction:
+            raise ValueError("cube friction variation requires the Panda cube_geom")
+        for object_id, value in self._nominal_body_mass.items():
+            self._model.body_mass[object_id] = value * mass_scale
+            self._model.body_inertia[object_id] = self._nominal_body_inertia[object_id] * mass_scale
+        for object_id, value in self._nominal_geom_friction.items():
+            self._model.geom_friction[object_id] = value * friction_scale
+        for joint_id in range(self._model.njnt):
+            joint_type = int(self._model.jnt_type[joint_id])
+            if joint_type in (int(mujoco.mjtJoint.mjJNT_HINGE), int(mujoco.mjtJoint.mjJNT_SLIDE)):
+                if self._model.jnt_limited[joint_id]:
+                    qpos_address = int(self._model.jnt_qposadr[joint_id])
+                    lower, upper = self._model.jnt_range[joint_id]
+                    if not lower <= self._data.qpos[qpos_address] <= upper:
+                        name = self.joint_names[joint_id]
+                        raise ValueError(f"reset position for joint {name!r} is outside [{lower}, {upper}]")
         mujoco.mj_forward(self._model, self._data)
         info: dict[str, Any] = {
             "simulation_time": float(self._data.time),
             "step_count": self._step_count,
             "seed": seed,
+            "physics_variation": {
+                "cube_mass_scale": mass_scale,
+                "cube_friction_scale": friction_scale,
+            },
             "is_success": False,
             **self._state_info(),
         }
