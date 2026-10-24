@@ -1,0 +1,163 @@
+# Trajecta
+
+**A simulation-first robot-learning framework for experiment-driven evaluation, failure analysis, and adaptive control using MuJoCo.**
+
+Trajecta provides a reproducible starting point for evaluating a Franka Emika Panda pick-and-place task in MuJoCo. The current implementation focuses on transparent control and task verification, experiment execution, and validated episode records. It does not yet train a learned policy or dynamics model.
+
+![Trajecta Panda pick-and-place simulation across four task phases](media/trajecta_phase_overview.jpg)
+
+See the [measured smoke-run card](media/trajecta_evaluation_card.jpg), per-episode [JSON summary](media/evaluation_summary.json), and [LinkedIn post draft](media/linkedin_post_draft.md). The 1080p MP4 is generated locally and excluded from Git to keep repository history small.
+
+## Motivation
+
+Robotics experiments need clear task outcomes, repeatable configurations, and traceable records. A controller that merely reaches a target does not establish a successful grasp or placement. Trajecta uses MuJoCo for headless simulation and verifies grasp and placement from simulated contacts and object state before reporting success.
+
+## Goals and design principles
+
+- Keep the environment, controller, kinematics, task, experiment orchestration, evaluation, and storage responsibilities distinct.
+- Make configuration, action scaling, task completion, and recorded data inspectable.
+- Keep simulation as the only robot backend in this release.
+- Report measured results with the trial conditions and limits that produced them.
+- Add learning and hardware capabilities only with suitable data, tests, baselines, and safety work.
+
+## Current status
+
+| Area | Status |
+| --- | --- |
+| Experiment specification and controller configuration | Implemented with Pydantic validation |
+| Gymnasium-style environment contract | Implemented; action/observation spaces and termination/truncation are explicit |
+| MuJoCo Panda scene and model assets | Implemented; bundled upstream assets and license retained |
+| Joint/gripper actuation and action mapping | Implemented; normalized action maps by MuJoCo actuator order and control ranges |
+| Inverse kinematics and end-effector positioning | Implemented and unit-tested |
+| Pick-and-place execution | Implemented with bilateral contact, lift, release, and placement checks |
+| Experiment runner and episode evaluation | Implemented; seeded episode sequence and summary metrics |
+| Episode experience persistence | Implemented as validated JSONL summaries (not step transitions) |
+| Failure diagnosis | Initial deterministic evidence-linked rules; hypotheses, not causal conclusions |
+| Dataset filtering, manifest, export, grouped split | Implemented for episode summary records |
+| Controller calibration and system identification | Not implemented |
+| Reinforcement learning | Not implemented |
+| Learned dynamics/world model | Not implemented |
+| Uncertainty-aware experiment selection | Not implemented |
+| Physical robot integration and sim-to-real evaluation | Not implemented |
+
+## Architecture and data flow
+
+```mermaid
+flowchart LR
+  Spec[ExperimentSpec] --> Runner[ExperimentRunner]
+  Runner --> Task[PickPlaceTask]
+  Task --> Controller[Panda position controller]
+  Controller --> IK[MuJoCo inverse kinematics]
+  Controller --> Env[MuJoCo robot environment]
+  Env --> Task
+  Task --> Result[Verified episode result]
+  Result --> Eval[ExperimentEvaluator]
+  Result --> Record[ExperienceRecord]
+  Record --> Store[JSONL experience store]
+  Store --> Dataset[Dataset filtering and grouped split]
+  Store --> Failure[Deterministic failure diagnosis]
+```
+
+See [the architecture notes](docs/architecture.md) for component contracts and data boundaries.
+
+## Technology
+
+- Python 3.10 or newer: package and examples (tested here with Python 3.13).
+- MuJoCo 3.x: physics, model loading, contacts, and offscreen rendering.
+- Gymnasium: standard action and observation space types and environment conventions.
+- NumPy: numerical state and IK calculations.
+- Pydantic 2: validated experiment and experience schemas.
+- pytest: automated tests.
+- OpenCV (optional `video` extra): MP4 recording and phase-frame export.
+
+The install distribution is named `trajecta`; the source import namespace remains `roboforge` for compatibility with the existing code and tests. No hardware libraries are used.
+
+## Repository layout
+
+```text
+src/roboforge/controllers/       controllers and controller contracts
+src/roboforge/environments/      MuJoCo/Gymnasium boundary, IK, bundled Panda model
+src/roboforge/tasks/             pick-and-place state machine and verification
+src/roboforge/experiments/       specifications, runner, evaluation, records, datasets
+src/roboforge/visualization/     optional MuJoCo viewer
+examples/                        demos, evaluation, failure analysis, video capture
+tests/                            unit and simulation integration tests
+docs/                             architecture and contributor guides
+media/frames/                    selected simulation frames for project presentation
+```
+
+## Setup
+
+Use a clean virtual environment from the repository root:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -e '.[dev,video]'
+```
+
+MuJoCo's Franka Panda model and meshes are bundled in `src/roboforge/environments/assets/panda/`; no separate model download is needed. The bundled `venv/` in some copies is machine-specific; create `.venv` as above if it points to a missing interpreter.
+
+## Run the simulation and experiments
+
+Open the model viewer:
+
+```bash
+python -m roboforge.visualization
+```
+
+On macOS, run the interactive pick-and-place demo through MuJoCo's launcher:
+
+```bash
+mjpython examples/pick_place_panda.py --seed 0
+```
+
+Run a headless batch and persist episode summaries:
+
+```bash
+python examples/evaluate_pick_place.py --episodes 5 --seed 0 --output artifacts/experiences.jsonl
+```
+
+Analyze failures in a saved JSONL file:
+
+```bash
+python examples/analyze_experiences.py artifacts/experiences.jsonl
+```
+
+Record a 1080p, 50 FPS MP4 and task-phase stills:
+
+```bash
+python examples/record_pick_place.py --seed 0 --output media/trajecta_pick_and_place_1080p.mp4 --frames-dir media/frames --width 1920 --height 1080 --fps 50
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+More examples and the exact stored fields are documented in [experiments](docs/experiments.md). The optional GUI viewer was not part of headless test verification.
+
+## Evaluation data
+
+The checked-in local run record set contains five successful episodes at seeds 0 through 4. Every record reports 570 control steps and 0.007594639 m horizontal placement error. The current environment resets the object to the same fixed location; these seeds do not yet randomize object or goal placement. Treat this as a deterministic smoke run, not evidence of generalization or a statistically meaningful benchmark. JSONL outputs contain episode summaries and omit per-step observations/actions/rewards.
+
+The video renderer reports the actual outcome and measured placement error. Screenshots in `media/frames/` are captures from the same simulator, not external photos.
+
+## Limitations and roadmap
+
+Current task/controller assumptions are specific to the bundled Panda scene. Experience records are episode-level; they are not sufficient for offline RL or dynamics learning. Calibration, policy training, learned world models, experiment selection, domain randomization, alternative robot backends, and hardware deployment remain future work.
+
+Roadmap: (1) collect validated state-action-reward transitions; (2) expand randomized held-out task evaluation; (3) add bounded controller calibration; (4) train/evaluate a policy and a narrowly scoped dynamics baseline; (5) measure candidate selection against a random baseline; (6) define and validate any hardware boundary independently.
+
+## Contribution, license, and attribution
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) and the development guide. Original project code is licensed under the root MIT license. The bundled MuJoCo Menagerie Panda model is separately licensed under Apache-2.0; retain its included license and attribution. See [third-party notices](THIRD_PARTY_NOTICES.md). These licenses do not imply affiliation with Franka, DeepMind, or MIT.
+
+## Troubleshooting
+
+- **`ModuleNotFoundError`:** activate `.venv` and run `python -m pip install -e '.[dev,video]'`.
+- **Viewer fails to start:** graphical support depends on the local display and MuJoCo platform setup. Headless tests and video rendering do not require opening the interactive viewer.
+- **macOS passive viewer error:** launch the demo with `mjpython examples/pick_place_panda.py --seed 0`.
+- **Video codec unavailable:** install the optional extra; the recorder reports an error if OpenCV cannot open an MP4 writer.
+- **Model file missing:** verify `src/roboforge/environments/assets/panda/panda.xml` and the adjacent `assets/` directory are present.

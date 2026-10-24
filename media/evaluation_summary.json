@@ -1,0 +1,63 @@
+{
+  "project": "Trajecta",
+  "evaluation_type": "simulation smoke evaluation",
+  "environment_id": "mujoco_panda_scene",
+  "task_id": "pick_and_place",
+  "experiment_id": "c50fcbd5-dd31-4d5f-9080-0e4ad2f54f78",
+  "episode_count": 5,
+  "successes": 5,
+  "success_rate": 1.0,
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "mean_episode_length_control_steps": 570,
+  "median_episode_length_control_steps": 570,
+  "mean_horizontal_placement_error_m": 0.007594639041382092,
+  "per_episode": [
+    {
+      "episode_id": "fd369267-51ca-46f8-b66f-af2754588d55",
+      "seed": 0,
+      "success": true,
+      "episode_length_control_steps": 570,
+      "horizontal_placement_error_m": 0.007594639041382092,
+      "failure_reason": null
+    },
+    {
+      "episode_id": "b5e3f51a-236e-42ec-b2b9-bbf9c2ff82ea",
+      "seed": 1,
+      "success": true,
+      "episode_length_control_steps": 570,
+      "horizontal_placement_error_m": 0.007594639041382092,
+      "failure_reason": null
+    },
+    {
+      "episode_id": "001f8a66-a612-4226-926d-54c0280b8d1a",
+      "seed": 2,
+      "success": true,
+      "episode_length_control_steps": 570,
+      "horizontal_placement_error_m": 0.007594639041382092,
+      "failure_reason": null
+    },
+    {
+      "episode_id": "49561897-1fff-46f6-b9cf-53355a11fa36",
+      "seed": 3,
+      "success": true,
+      "episode_length_control_steps": 570,
+      "horizontal_placement_error_m": 0.007594639041382092,
+      "failure_reason": null
+    },
+    {
+      "episode_id": "6ab1e72f-88b7-441b-afbf-cd4dc385e29b",
+      "seed": 4,
+      "success": true,
+      "episode_length_control_steps": 570,
+      "horizontal_placement_error_m": 0.007594639041382092,
+      "failure_reason": null
+    }
+  ],
+  "interpretation_limit": "The reset scene is fixed; seeds do not currently randomize object or goal placement. Five repeated episodes under this setup are a smoke check, not an independent generalization benchmark."
+}

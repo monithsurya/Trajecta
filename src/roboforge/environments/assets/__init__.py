@@ -1,0 +1,1 @@
+"""Trajecta environment assets package."""

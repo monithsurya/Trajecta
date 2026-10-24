@@ -1,0 +1,39 @@
+# Python caches and packaging
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Tests and virtual environments
+.pytest_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# Editors and OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Local configuration, credentials, and logs
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+
+# Generated runs, video, and source archive duplicate
+artifacts/
+media/*.mp4
+media/*.jsonl
+*.mp4
+google-deepmind*mujoco_menagerie*franka_emika_panda.zip
