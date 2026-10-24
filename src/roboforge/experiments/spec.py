@@ -17,6 +17,7 @@ class TaskType(str, Enum):
     """Supported task identifiers for Trajecta experiments."""
 
     PICK_AND_PLACE = "pick_and_place"
+    PANDA_REACH = "panda_reach"
 
 
 class ControllerType(str, Enum):

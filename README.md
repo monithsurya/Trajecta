@@ -37,8 +37,8 @@ Robotics experiments need clear task outcomes, repeatable configurations, and tr
 | Dataset filtering, manifest, export, grouped split | Implemented for episode summary records |
 | Controller calibration | Partially implemented: bounded Panda joint-setpoint gain sweep and paired tracking evaluation; physical dynamics system identification is not implemented |
 | Reinforcement learning | Partially implemented: optional PPO training and paired evaluation for Panda reaching; no learned pick-and-place policy |
-| Learned dynamics/world model | Not implemented |
-| Uncertainty-aware experiment selection | Not implemented |
+| Learned dynamics/world model | Partially implemented research prototype: predicts 24 Panda reach joint/task deltas; variable held-out performance and not better than persistence in every seed |
+| Uncertainty-aware experiment selection | Partially implemented research prototype: bounded Panda reach target selection by ensemble disagreement; small comparison is inconclusive on reliable benefit |
 | Physical robot integration and sim-to-real evaluation | Not implemented |
 
 ## Architecture and data flow
@@ -62,6 +62,10 @@ flowchart LR
   Compare --> EvalStore[Reach evaluation JSONL]
   Compare --> Record
   Compare --> Transitions
+  Transitions --> WorldModel[Episode-split ridge ensemble]
+  WorldModel --> Metrics[Held-out prediction and disagreement metrics]
+  WorldModel --> Selector[Random or uncertainty target selection]
+  Selector --> Reach
   Calibration[Panda gain calibration] --> Controller
   Calibration --> Env
   Calibration --> CalibrationStore[Calibration result JSONL]
@@ -168,6 +172,15 @@ python examples/evaluate_panda_reach.py artifacts/panda_reach_ppo/checkpoints/be
 
 See [Panda reach PPO](docs/reinforcement_learning.md) for reward details, outputs, comparison methodology, and limitations.
 
+Run one bounded predictive-learning/selection loop, or compare random with uncertainty-driven selection from the same bootstrap data:
+
+```bash
+python examples/run_active_learning.py --strategy uncertainty --seed 0 --bootstrap-episodes 5 --iterations 3
+python examples/compare_selection_strategies.py --seeds 0 1 2 --bootstrap-episodes 5 --iterations 3
+```
+
+The reach-only model, uncertainty proxy, split protocol, logs, and scientific limits are documented in [predictive learning and experiment selection](docs/predictive_learning.md).
+
 Run tests:
 
 ```bash
@@ -184,9 +197,9 @@ The video renderer reports the actual outcome and measured placement error. Scre
 
 ## Limitations and roadmap
 
-Current task/controller assumptions are specific to the bundled Panda scene. PPO trains only a goal-conditioned reaching policy and reports paired held-out-seed results against the IK-guided heuristic; it does not train pick-and-place or establish generalization. The pick-and-place adapter's optional step records still carry that environment's zero reward; the reach environment has a separate shaped reward. Calibration currently tunes the controller's setpoint blend gain; identifying physical dynamics such as mass, friction, or actuator response remains future work. Learned world models, uncertainty-aware experiment selection, domain randomization, alternative robot backends, and hardware/sim-to-real evaluation remain future work.
+Current task/controller assumptions are specific to the bundled Panda scene. PPO trains only a goal-conditioned reaching policy and reports paired held-out-seed results against the IK-guided heuristic; it does not train pick-and-place or establish generalization. The first learned model predicts the separate reach task's MuJoCo observation deltas; uncertainty selection only ranks bounded reach targets. Neither is a contact-rich pick-and-place world model or general-purpose autonomous experimentation system. The pick-and-place adapter's optional step records still carry that environment's zero reward; the reach environment has a separate shaped reward. Calibration currently tunes the controller's setpoint blend gain; identifying physical dynamics such as mass, friction, or actuator response remains future work. Domain randomization, alternative robot backends, and hardware/sim-to-real evaluation remain future work.
 
-Roadmap: (1) expand randomized held-out task evaluation; (2) identify measurable MuJoCo actuator/robot dynamics beyond command gain; (3) train/evaluate a policy and a narrowly scoped learned dynamics baseline; (4) measure candidate selection against a random baseline; (5) define and validate any hardware boundary independently. Transition capture is a data-recording facility only; it does not implement reinforcement learning, a learned world model, or adaptive experiment selection.
+Roadmap: (1) expand randomized held-out task evaluation; (2) identify measurable MuJoCo actuator/robot dynamics beyond command gain; (3) validate predictive models on broader reach data and add contact-rich task state only when recording schemas support it; (4) extend multi-seed candidate-selection comparisons and test whether uncertainty tracks prediction error; (5) define and validate any hardware boundary independently. Transition capture itself is a recording facility; the reach-specific learner and selector consume its structured transitions, while other tasks do not yet have those capabilities.
 
 ## Contribution, license, and attribution
 

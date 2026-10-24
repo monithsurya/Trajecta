@@ -15,6 +15,7 @@ Trajecta is a single Python package with explicit interfaces between experiment 
 - **Controller calibration** (`experiments/calibration.py`): paired seeded Panda joint-target trials compare the default direct setpoint against bounded blend gains, estimate the commanded blend from normalized actions, and persist tracking evidence without changing controller defaults.
 - **Panda reach environment** (`environments/panda_reach.py`): separate Gymnasium goal-reaching task with bounded Cartesian-delta actions, joint/goal observations, explicit shaped reward, workspace/IK constraint termination, and an IK-guided baseline.
 - **Optional PPO pipeline** (`experiments/rl.py`): Stable-Baselines3 PPO training, periodic evaluation and checkpointing, plus held-out paired evaluation against the IK baseline. Evaluation can persist existing episode experiences and step transitions as well as versioned policy metrics.
+- **Predictive learning and selection** (`experiments/world_model.py`, `active_learning.py`): episode-split NumPy ridge ensemble trained from Panda reach transition records; it excludes the fixed-base free-joint pose and predicts 24 named joint/task state deltas. It provides persistence comparison, held-out prediction/disagreement metrics, seeded bounded target candidates, random or uncertainty ranking, runner-based execution, and retraining.
 - **Visualization and examples** (`visualization/`, `examples/`): optional viewer, task/evaluation examples, and headless video capture.
 
 ## Data flow
@@ -53,6 +54,22 @@ flowchart LR
   Pair --> Transition[Optional TransitionRecord JSONL]
 ```
 
+The predictive-learning loop reuses the existing experience and transition stores, plus `ExperimentRunner` for each selected reach episode:
+
+```mermaid
+flowchart LR
+  Bootstrap[Seeded reach bootstrap] --> Runner[ExperimentRunner]
+  Runner --> Experience[ExperienceRecord JSONL]
+  Runner --> Transition[TransitionRecord JSONL]
+  Transition --> Split[Episode train/validation/test split]
+  Split --> Model[Bagged ridge delta model]
+  Model --> Metrics[Persistence comparison and test errors]
+  Model --> Score[Ensemble disagreement scores]
+  Random[Random candidate baseline] --> Select[Valid goal target]
+  Score --> Select
+  Select --> Runner
+```
+
 ## Boundaries and limitations
 
-Episode summaries describe episodes; optional transition records contain per-step data. The PPO reach pipeline is the only RL implementation and trains on the separate reaching task; it does not consume the existing pick-and-place experiment records for learning. No learned dynamics implementation exists. Failure categories are not causal claims. The environments are simulation-only; there is no physical robot interface or safety controller. The pick-and-place task uses fixed cube and destination positions, and reach results do not include domain randomization. Calibration estimates the controller setpoint blend only; it does not identify physical robot or actuator dynamics.
+Episode summaries describe episodes; optional transition records contain per-step data. The PPO reach pipeline is the only RL implementation and trains on the separate reaching task; it does not consume the existing pick-and-place experiment records for learning. A NumPy ridge ensemble predicts Panda reach observation deltas only; it is not a contact-rich manipulation dynamics model. Its ensemble disagreement ranks bounded reach targets, but is not calibrated confidence. Failure categories are not causal claims. The environments are simulation-only; there is no physical robot interface or safety controller. The pick-and-place task uses fixed cube and destination positions, and reach results do not include domain randomization. Calibration estimates the controller setpoint blend only; it does not identify physical robot or actuator dynamics.
